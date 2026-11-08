@@ -1,0 +1,6 @@
+.pio/
+managed_components/
+build.log
+sdkconfig.esp32-s31
+sdkconfig.esp32-s31.old
+.vscode/

@@ -1,0 +1,11 @@
+## IDF Component Manager manifest for the application component.
+## Versions are pinned so a clean build resolves the same code; dependencies.lock records the
+## transitive set (esp_websocket_client, noise-c, libsodium, micro-flac).
+dependencies:
+  idf: ">=6.1.0"
+  # Official Sendspin protocol library (player, controller and metadata roles used here)
+  sendspin/sendspin-cpp: "==0.9.5"
+  # mDNS advertisement of _sendspin._tcp so Music Assistant discovers the player
+  espressif/mdns: "==1.15.1"
+  # JSON for the web API (also a sendspin-cpp dependency)
+  bblanchon/arduinojson: "==7.4.3"

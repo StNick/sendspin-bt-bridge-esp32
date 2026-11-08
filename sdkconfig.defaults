@@ -1,0 +1,61 @@
+# ---------------------------------------------------------------------------
+# Flash, partitions, app
+# ---------------------------------------------------------------------------
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
+CONFIG_APP_PROJECT_VER="1.0.0"
+
+# ---------------------------------------------------------------------------
+# PSRAM. sendspin-cpp keeps about 1.2 MB of encoded audio, which only fits in PSRAM.
+# IGNORE_NOTFOUND lets a board without PSRAM still boot so the web UI can report the problem.
+# ---------------------------------------------------------------------------
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# ---------------------------------------------------------------------------
+# FreeRTOS / system
+# ---------------------------------------------------------------------------
+CONFIG_FREERTOS_HZ=1000
+# The main task runs the Sendspin client loop, its callbacks and NVS persistence.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# ---------------------------------------------------------------------------
+# Bluetooth: Classic only (BR/EDR), Bluedroid host, A2DP source + AVRCP
+# (same base as ESP-IDF's examples/bluetooth/bluedroid/classic_bt/a2dp_source,
+#  which lists ESP32-S31 as a supported target)
+# ---------------------------------------------------------------------------
+CONFIG_BT_ENABLED=y
+CONFIG_BTDM_CTRL_MODE_BLE_ONLY=n
+CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y
+CONFIG_BTDM_CTRL_MODE_BTDM=n
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_CLASSIC_ENABLED=y
+CONFIG_BT_A2DP_ENABLE=y
+CONFIG_BT_BLE_ENABLED=n
+# The A2DP source data callback and all Bluedroid callbacks run on the BTC task.
+CONFIG_BT_BTC_TASK_STACK_SIZE=4096
+
+# ---------------------------------------------------------------------------
+# Sendspin (sendspin-cpp component Kconfig): player + controller + metadata only.
+# Opus is off: the Bluetooth SBC encoder only takes 44.1 kHz, Opus is 48 kHz only.
+# ---------------------------------------------------------------------------
+CONFIG_SENDSPIN_ENABLE_PLAYER=y
+CONFIG_SENDSPIN_ENABLE_OPUS=n
+CONFIG_SENDSPIN_ENABLE_CONTROLLER=y
+CONFIG_SENDSPIN_ENABLE_METADATA=y
+CONFIG_SENDSPIN_ENABLE_ARTWORK=n
+CONFIG_SENDSPIN_ENABLE_VISUALIZER=n
+CONFIG_SENDSPIN_ENABLE_COLOR=n
+CONFIG_SENDSPIN_ENABLE_SOURCE=n
+
+# ---------------------------------------------------------------------------
+# Networking: Sendspin WebSocket server (4 connections + listen/ctrl sockets), web UI
+# (4 connections + listen/ctrl), outbound Sendspin client, mDNS
+# ---------------------------------------------------------------------------
+CONFIG_LWIP_MAX_SOCKETS=20
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+CONFIG_HTTPD_MAX_URI_LEN=128

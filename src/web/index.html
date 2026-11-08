@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sendspin BT Bridge</title>
+<style>
+:root{--bg:#f4f5f7;--card:#fff;--fg:#1d2330;--muted:#667085;--line:#e3e6eb;--accent:#6b46c1;--accent-fg:#fff;--ok:#1a7f4b;--warn:#b54708;--bad:#b42318;}
+@media (prefers-color-scheme:dark){:root{--bg:#12141a;--card:#1b1e26;--fg:#e8eaf0;--muted:#98a2b3;--line:#2a2f3a;--accent:#9f7aea;--accent-fg:#12141a;--ok:#4ade80;--warn:#fbbf24;--bad:#f87171;}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{padding:16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+header h1{font-size:18px;margin:0}
+header .sub{color:var(--muted);font-size:13px}
+main{display:grid;gap:16px;padding:0 16px 32px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));max-width:1200px;margin:0 auto}
+section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0}
+section h2{font-size:15px;margin:0 0 12px;display:flex;justify-content:space-between;align-items:center;gap:8px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:14px}
+.kv dt{color:var(--muted)}.kv dd{margin:0;overflow-wrap:anywhere}
+.pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;border:1px solid currentColor}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.muted{color:var(--muted)}
+button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:8px;padding:6px 12px;cursor:pointer}
+button.primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
+button.danger{color:var(--bad);border-color:var(--bad)}
+button:disabled{opacity:.5;cursor:default}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.np-title{font-size:17px;font-weight:600;margin:0}
+.np-artist{color:var(--muted);margin:0 0 6px}
+input[type=range]{width:100%}
+label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
+input[type=text],input[type=password],input[type=number],select{width:100%;padding:7px 9px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit}
+.check{display:flex;gap:8px;align-items:center;color:var(--fg);font-size:14px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
+ul.devices{list-style:none;padding:0;margin:8px 0 0;max-height:260px;overflow:auto}
+ul.devices li{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:14px}
+ul.devices li small{color:var(--muted)}
+pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;max-height:340px;overflow:auto;font-size:12px;white-space:pre-wrap;word-break:break-all;margin:8px 0 0}
+.banner{background:var(--card);border:1px solid var(--warn);color:var(--fg);border-radius:12px;padding:12px 16px;margin:0 16px 16px;max-width:1168px}
+@media(min-width:1232px){.banner{margin:0 auto 16px}}
+.code{font-size:28px;font-weight:700;letter-spacing:4px}
+.progress{height:4px;background:var(--line);border-radius:2px;overflow:hidden;margin:6px 0}
+.progress>div{height:100%;background:var(--accent);width:0}
+#toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:8px 14px;border-radius:8px;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Sendspin BT Bridge</h1>
+  <span class="sub" id="subtitle">ESP32-S31</span>
+</header>
+<div id="banners"></div>
+<main>
+  <section>
+    <h2>Now playing <span id="ss-pill" class="pill muted">—</span></h2>
+    <p class="np-title" id="np-title">Nothing playing</p>
+    <p class="np-artist" id="np-artist"></p>
+    <div class="progress"><div id="np-progress"></div></div>
+    <div class="row">
+      <button data-cmd="previous" aria-label="Previous">⏮</button>
+      <button data-cmd="play" aria-label="Play">▶</button>
+      <button data-cmd="pause" aria-label="Pause">⏸</button>
+      <button data-cmd="next" aria-label="Next">⏭</button>
+      <button id="mute-btn">Mute</button>
+    </div>
+    <label for="vol">Volume <span id="vol-val"></span></label>
+    <input type="range" id="vol" min="0" max="100" step="1">
+    <label for="delay">Static delay (ms) — latency compensation for this speaker</label>
+    <div class="row" style="margin-top:0">
+      <input type="number" id="delay" min="0" max="5000" style="width:120px">
+      <button id="delay-btn">Apply</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Speaker <span id="bt-pill" class="pill muted">—</span></h2>
+    <dl class="kv" id="bt-kv"></dl>
+    <div class="row">
+      <button id="bt-reconnect">Reconnect</button>
+      <button id="bt-standby">Disconnect</button>
+      <button id="bt-forget" class="danger">Forget</button>
+    </div>
+    <div class="row">
+      <button id="bt-scan" class="primary">Scan for speakers</button>
+      <span class="muted" id="scan-note"></span>
+    </div>
+    <ul class="devices" id="scan-list"></ul>
+  </section>
+
+  <section>
+    <h2>Music Assistant <span id="ma-pill" class="pill muted">—</span></h2>
+    <dl class="kv" id="ma-kv"></dl>
+    <div id="pairing"></div>
+  </section>
+
+  <section>
+    <h2>Settings</h2>
+    <form id="cfg-form" autocomplete="off">
+      <label for="c-name">Player name (shown in Music Assistant)</label>
+      <input type="text" id="c-name" maxlength="63" required>
+      <div class="grid2">
+        <div><label for="c-ssid">Wi-Fi network</label><input type="text" id="c-ssid" maxlength="32" list="ssids"><datalist id="ssids"></datalist></div>
+        <div><label for="c-pass">Wi-Fi password</label><input type="password" id="c-pass" maxlength="63" placeholder="unchanged"></div>
+      </div>
+      <div class="row" style="margin-top:6px"><button type="button" id="wifi-scan">Find networks</button></div>
+      <label for="c-url">Music Assistant Sendspin URL (optional; leave empty for automatic discovery)</label>
+      <input type="text" id="c-url" placeholder="ws://192.168.1.10:8927/sendspin">
+      <label class="check"><input type="checkbox" id="c-pair"> Require pairing before Music Assistant can play</label>
+      <label for="c-idle">When idle</label>
+      <select id="c-idle">
+        <option value="default">Do nothing (keep the speaker connected)</option>
+        <option value="power_save">Power save: pause the Bluetooth stream</option>
+        <option value="auto_disconnect">Auto-disconnect the speaker</option>
+        <option value="keep_alive">Keep alive: stop the speaker from sleeping</option>
+      </select>
+      <div class="grid2">
+        <div><label for="c-psd">Power-save delay (min)</label><input type="number" id="c-psd" min="0" max="1440"></div>
+        <div><label for="c-idc">Auto-disconnect after (min, 0 = never)</label><input type="number" id="c-idc" min="0" max="1440"></div>
+        <div><label for="c-kai">Keep-alive interval (s, ≥30)</label><input type="number" id="c-kai" min="30" max="3600"></div>
+        <div><label for="c-kam">Keep-alive sound</label><select id="c-kam"><option value="infrasound">Infrasound (2 Hz)</option><option value="silence">Silence</option><option value="none">None</option></select></div>
+        <div><label for="c-chk">Reconnect check interval (s)</label><input type="number" id="c-chk" min="5" max="600"></div>
+        <div><label for="c-mxf">Give up after N failures (0 = never)</label><input type="number" id="c-mxf" min="0" max="1000"></div>
+        <div><label for="c-buf">Buffer (ms)</label><input type="number" id="c-buf" min="100" max="3000"></div>
+        <div><label for="c-lead">Startup lead time (ms)</label><input type="number" id="c-lead" min="0" max="5000"></div>
+        <div><label for="c-pin">Legacy Bluetooth PIN</label><input type="text" id="c-pin" maxlength="16"></div>
+        <div><label for="c-web">Web UI password (user "admin")</label><input type="password" id="c-web" maxlength="64" placeholder="unchanged"></div>
+      </div>
+      <div class="row"><button type="submit" class="primary">Save</button><span class="muted" id="cfg-note"></span></div>
+    </form>
+  </section>
+
+  <section>
+    <h2>System</h2>
+    <dl class="kv" id="sys-kv"></dl>
+    <label for="ota-file">Firmware update (.bin from <code>.pio/build/esp32-s31/firmware.bin</code>)</label>
+    <input type="file" id="ota-file" accept=".bin">
+    <div class="row">
+      <button id="ota-btn">Upload firmware</button>
+      <button id="reboot-btn">Reboot</button>
+      <button id="reset-btn" class="danger">Factory reset</button>
+    </div>
+    <span class="muted" id="ota-note"></span>
+  </section>
+
+  <section>
+    <h2>Logs <button id="logs-btn">Refresh</button></h2>
+    <pre id="logs">Press Refresh.</pre>
+  </section>
+</main>
+<div id="toast"></div>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let status = null;
+let volumeDragging = false;
+let delayEditing = false;
+let cfgLoaded = false;
+
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.style.opacity = 1;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => (t.style.opacity = 0), 2500);
+}
+
+async function api(path, body) {
+  const opts = body === undefined ? {} : {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body),
+  };
+  const r = await fetch(path, opts);
+  let data = null;
+  try { data = await r.json(); } catch (e) { /* not JSON */ }
+  if (!r.ok) throw new Error((data && data.error) || r.statusText);
+  return data;
+}
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+}
+
+function kv(el, rows) {
+  el.innerHTML = rows.filter((r) => r[1] !== undefined && r[1] !== null && r[1] !== "")
+    .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
+}
+
+function pill(el, text, cls) {
+  el.textContent = text;
+  el.className = "pill " + cls;
+}
+
+function fmtTime(ms) {
+  const s = Math.floor(ms / 1000);
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+}
+
+function fmtBytes(n) {
+  return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.round(n / 1024) + " KB";
+}
+
+const BT_STATES = {
+  no_speaker: ["No speaker", "warn"], disconnected: ["Disconnected", "bad"], connecting: ["Connecting", "warn"],
+  connected: ["Connected", "ok"], streaming: ["Streaming", "ok"], disconnecting: ["Disconnecting", "warn"],
+  standby: ["Standby", "muted"], gave_up: ["Gave up", "bad"],
+};
+
+function render(s) {
+  status = s;
+  const ss = s.sendspin, bt = s.bluetooth, w = s.wifi, sys = s.system;
+  $("title").textContent = sys.name;
+  document.title = sys.name;
+  $("subtitle").textContent = (w.ip ? w.ip + " · " : "") + "v" + sys.version;
+
+  // Banners
+  const banners = [];
+  if (!w.configured) banners.push(`Connected to the setup access point. Enter your Wi-Fi network under Settings and press Save; the bridge then restarts and joins it.`);
+  else if (w.ap_active) banners.push(`Cannot reach Wi-Fi “${esc(w.ssid)}”. Setup access point “${esc(w.ap_ssid)}” is on; check the Wi-Fi settings.`);
+  if (!ss.enabled) banners.push(`Sendspin is disabled: ${esc(ss.disabled_reason)}`);
+  if (!bt.has_speaker) banners.push(`No speaker selected. Put your speaker in pairing mode, press <b>Scan for speakers</b>, then <b>Use</b>.`);
+  $("banners").innerHTML = banners.map((b) => `<div class="banner">${b}</div>`).join("");
+
+  // Now playing
+  const playing = ss.playback_state === "playing";
+  $("np-title").textContent = ss.title || (playing ? "Playing" : "Nothing playing");
+  $("np-artist").textContent = [ss.artist, ss.album].filter(Boolean).join(" — ");
+  $("np-progress").style.width = ss.duration_ms ? Math.min(100, 100 * ss.progress_ms / ss.duration_ms) + "%" : "0";
+  document.querySelectorAll("[data-cmd]").forEach((b) => {
+    b.disabled = !ss.supported_commands.includes(b.dataset.cmd);
+  });
+  if (!volumeDragging) $("vol").value = ss.volume;
+  $("vol-val").textContent = ss.volume + "%" + (ss.muted ? " (muted)" : "");
+  $("mute-btn").textContent = ss.muted ? "Unmute" : "Mute";
+  if (!delayEditing && document.activeElement !== $("delay")) $("delay").value = ss.output_delay_ms;
+  pill($("ss-pill"), ss.stream_active ? (ss.stream_codec || "Streaming") : (playing ? "Playing" : "Idle"),
+       ss.stream_active ? "ok" : "muted");
+
+  // Speaker
+  const st = BT_STATES[bt.state] || [bt.state, "muted"];
+  pill($("bt-pill"), st[0], st[1]);
+  kv($("bt-kv"), [
+    ["Name", bt.speaker_name || (bt.has_speaker ? "(unnamed)" : "")],
+    ["Address", bt.speaker_mac],
+    ["Signal (RSSI)", bt.rssi_dbm !== undefined ? (bt.rssi_dbm === 0 ? "good (inside ideal range)" : (bt.rssi_dbm > 0 ? "+" : "") + bt.rssi_dbm + " dB vs. ideal range") : ""],
+    ["Volume control", bt.connected ? (bt.abs_volume ? "Speaker (AVRCP absolute volume)" : "Bridge (software)") : ""],
+    ["Reported latency", bt.delay_report_ms !== undefined ? bt.delay_report_ms + " ms" : ""],
+    ["Channels", bt.connected && bt.mono_sink ? "Mono speaker (down-mixed)" : ""],
+    ["Next retry", bt.next_attempt_in_s >= 0 ? `in ${bt.next_attempt_in_s} s (attempt ${bt.reconnect_attempt + 1})` : ""],
+    ["Idle", ss.idle_state],
+    ["Last event", bt.last_event],
+    ["Bridge address", bt.local_mac],
+  ]);
+  $("bt-reconnect").disabled = !bt.has_speaker || bt.connected;
+  $("bt-standby").disabled = !bt.has_speaker || !(bt.connected || bt.state === "connecting");
+  $("bt-forget").disabled = !bt.has_speaker;
+  $("bt-scan").disabled = bt.scanning;
+  $("scan-note").textContent = bt.scanning ? "Scanning (about 13 s)… audio may stutter meanwhile" : "";
+  const list = bt.scan_results.slice().sort((a, b) => (b.audio - a.audio) || (b.rssi - a.rssi));
+  $("scan-list").innerHTML = list.map((d) => `<li><span>${esc(d.name || d.mac)}<br><small>${esc(d.mac)} · ${d.rssi} dBm${d.audio ? " · audio" : ""}${d.bonded ? " · paired" : ""}</small></span>
+    <button data-mac="${esc(d.mac)}" data-name="${esc(d.name)}" ${d.mac === bt.speaker_mac ? "disabled" : ""}>${d.mac === bt.speaker_mac ? "Selected" : "Use"}</button></li>`).join("");
+
+  // Music Assistant
+  pill($("ma-pill"), ss.connected ? "Connected" : (ss.enabled ? "Waiting" : "Disabled"), ss.connected ? "ok" : "warn");
+  kv($("ma-kv"), [
+    ["Server", ss.server_name],
+    ["Group", ss.group_name],
+    ["Playback", ss.playback_state],
+    ["Session", ss.connected ? (ss.paired ? "Paired" : "Unpaired") : ""],
+    ["Clock sync", ss.connected ? (ss.time_synced ? "Synced" : "Syncing…") : ""],
+    ["Unpaired servers may play", ss.enabled ? (ss.unpaired_access ? "Yes" : "No") : ""],
+    ["Discovery", w.hostname ? `${w.hostname}.local:8928 (_sendspin._tcp)` : ""],
+    ["Pairing", ss.pairing_event],
+    ["Client ID", ss.client_id],
+  ]);
+  let p = "";
+  if (ss.pairing_code) p += `<p>Enter this code in Music Assistant:</p><p class="code">${esc(ss.pairing_code)}</p>`;
+  if (ss.pairing_window_prompt) p += `<p>Music Assistant wants to pair with this bridge.</p><div class="row"><button class="primary" id="pair-ok">Allow pairing</button><button id="pair-no">Cancel</button></div>`;
+  $("pairing").innerHTML = p;
+  if ($("pair-ok")) $("pair-ok").onclick = () => api("/api/pairing/confirm", {}).then(() => toast("Pairing allowed"));
+  if ($("pair-no")) $("pair-no").onclick = () => api("/api/pairing/cancel", {}).then(() => toast("Pairing cancelled"));
+
+  // System
+  kv($("sys-kv"), [
+    ["Firmware", sys.version + " (ESP-IDF " + sys.idf + ")"],
+    ["Uptime", Math.floor(sys.uptime_s / 3600) + " h " + Math.floor(sys.uptime_s % 3600 / 60) + " min"],
+    ["Wi-Fi", w.connected ? `${w.ssid} (${w.rssi} dBm)` : (w.configured ? "Not connected" : "Not configured")],
+    ["Internal RAM free", fmtBytes(sys.heap_internal_free) + " (min " + fmtBytes(sys.heap_internal_min) + ")"],
+    ["PSRAM free", sys.psram_total ? fmtBytes(sys.psram_free) + " of " + fmtBytes(sys.psram_total) : "none"],
+    ["Hostname", w.hostname ? w.hostname + ".local" : ""],
+    ["Wi-Fi MAC", w.mac],
+  ]);
+}
+
+async function poll() {
+  try {
+    render(await api("/api/status"));
+  } catch (e) {
+    $("subtitle").textContent = "offline: " + e.message;
+  }
+  setTimeout(poll, 2000);
+}
+
+async function loadConfig() {
+  const c = await api("/api/config");
+  $("c-name").value = c.name;
+  $("c-ssid").value = c.wifi_ssid;
+  $("c-pass").placeholder = c.wifi_password_set ? "unchanged" : "none";
+  $("c-url").value = c.server_url;
+  $("c-pair").checked = c.require_pairing;
+  $("c-idle").value = c.idle_mode;
+  $("c-psd").value = c.power_save_delay_min;
+  $("c-idc").value = c.idle_disconnect_min;
+  $("c-kai").value = c.keepalive_interval_s;
+  $("c-kam").value = c.keepalive_method;
+  $("c-chk").value = c.bt_check_interval_s;
+  $("c-mxf").value = c.bt_max_reconnect_fails;
+  $("c-buf").value = c.min_buffer_ms;
+  $("c-lead").value = c.lead_time_ms;
+  $("c-pin").value = c.bt_pin;
+  $("c-web").placeholder = c.web_password_set ? "unchanged" : "none";
+  cfgLoaded = true;
+}
+
+$("cfg-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  if (!cfgLoaded) return;
+  const num = (id) => parseInt($(id).value, 10);
+  const body = {
+    name: $("c-name").value.trim(),
+    wifi_ssid: $("c-ssid").value.trim(),
+    server_url: $("c-url").value.trim(),
+    require_pairing: $("c-pair").checked,
+    idle_mode: $("c-idle").value,
+    power_save_delay_min: num("c-psd"),
+    idle_disconnect_min: num("c-idc"),
+    keepalive_interval_s: num("c-kai"),
+    keepalive_method: $("c-kam").value,
+    bt_check_interval_s: num("c-chk"),
+    bt_max_reconnect_fails: num("c-mxf"),
+    min_buffer_ms: num("c-buf"),
+    lead_time_ms: num("c-lead"),
+    bt_pin: $("c-pin").value,
+  };
+  if ($("c-pass").value) body.wifi_password = $("c-pass").value;
+  if ($("c-web").value) body.web_password = $("c-web").value;
+  try {
+    const r = await api("/api/config", body);
+    $("c-pass").value = "";
+    $("c-web").value = "";
+    if (r.reboot_required) {
+      $("cfg-note").textContent = "Saved. Restarting to apply…";
+      await api("/api/reboot", {});
+    } else {
+      $("cfg-note").textContent = "Saved.";
+    }
+    loadConfig();
+  } catch (e) {
+    $("cfg-note").textContent = "Error: " + e.message;
+  }
+});
+
+$("wifi-scan").onclick = async () => {
+  $("wifi-scan").disabled = true;
+  try {
+    const r = await api("/api/wifi/scan");
+    $("ssids").innerHTML = r.networks.map((n) => `<option value="${esc(n.ssid)}">${n.rssi} dBm${n.secure ? "" : " (open)"}</option>`).join("");
+    toast(r.networks.length + " networks found; pick one in the Wi-Fi network field");
+  } catch (e) { toast("Scan failed: " + e.message); }
+  $("wifi-scan").disabled = false;
+};
+
+document.querySelectorAll("[data-cmd]").forEach((b) => {
+  b.onclick = () => api("/api/transport", {command: b.dataset.cmd}).catch((e) => toast(e.message));
+});
+$("vol").addEventListener("input", () => { volumeDragging = true; $("vol-val").textContent = $("vol").value + "%"; });
+$("vol").addEventListener("change", () => {
+  api("/api/volume", {volume: parseInt($("vol").value, 10)}).catch((e) => toast(e.message));
+  setTimeout(() => (volumeDragging = false), 1500);
+});
+$("mute-btn").onclick = () => api("/api/volume", {muted: !(status && status.sendspin.muted)});
+$("delay").addEventListener("focus", () => (delayEditing = true));
+$("delay-btn").onclick = async () => {
+  try {
+    await api("/api/delay", {delay_ms: parseInt($("delay").value, 10)});
+    toast("Static delay set");
+  } catch (e) { toast(e.message); }
+  delayEditing = false;
+};
+$("bt-scan").onclick = () => api("/api/bt/scan", {}).then(() => toast("Scanning…"));
+$("bt-reconnect").onclick = () => api("/api/bt/reconnect", {}).then(() => toast("Reconnecting…"));
+$("bt-standby").onclick = () => api("/api/bt/standby", {}).then(() => toast("Disconnecting…"));
+$("bt-forget").onclick = () => {
+  if (confirm("Forget this speaker and remove its pairing?")) api("/api/bt/forget", {}).then(() => toast("Speaker forgotten"));
+};
+$("scan-list").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button[data-mac]");
+  if (!b) return;
+  api("/api/bt/select", {mac: b.dataset.mac, name: b.dataset.name}).then(() => toast("Connecting to " + (b.dataset.name || b.dataset.mac) + "…"))
+    .catch((e) => toast(e.message));
+});
+$("logs-btn").onclick = async () => {
+  const r = await fetch("/api/logs");
+  const pre = $("logs");
+  pre.textContent = await r.text();
+  pre.scrollTop = pre.scrollHeight;
+};
+$("reboot-btn").onclick = () => { if (confirm("Reboot the bridge?")) api("/api/reboot", {}).then(() => toast("Rebooting…")); };
+$("reset-btn").onclick = () => {
+  if (confirm("Erase all settings, the Music Assistant pairing and the Bluetooth pairing, then reboot?"))
+    api("/api/factory_reset", {}).then(() => toast("Resetting…"));
+};
+$("ota-btn").onclick = async () => {
+  const f = $("ota-file").files[0];
+  if (!f) { toast("Choose a firmware .bin first"); return; }
+  $("ota-btn").disabled = true;
+  $("ota-note").textContent = "Uploading " + fmtBytes(f.size) + "…";
+  try {
+    const r = await fetch("/api/ota", {method: "POST", headers: {"Content-Type": "application/octet-stream"}, body: f});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || r.statusText);
+    $("ota-note").textContent = "Done. Rebooting into the new firmware…";
+  } catch (e) {
+    $("ota-note").textContent = "Update failed: " + e.message;
+  }
+  $("ota-btn").disabled = false;
+};
+
+loadConfig().catch(() => {});
+poll();
+</script>
+</body>
+</html>
