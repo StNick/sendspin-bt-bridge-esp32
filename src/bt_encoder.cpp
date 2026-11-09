@@ -24,15 +24,20 @@ constexpr const char* TAG = "bt_encoder";
 constexpr uint32_t AAC_BITRATE = 160000;
 }
 
-esp_err_t BtEncoder::register_endpoints() {
-    // Lowest endpoint index wins when we initiate negotiation.
-    esp_a2d_mcc_t ldac{};
-    ldac.type = ESP_A2D_MCT_NON_A2DP;
-    const uint8_t rate = AudioPipe::sample_rate() == 48000 ? REPO_LDAC_RATE_48000 : REPO_LDAC_RATE_44100;
-    const uint8_t ldac_cie[8] = {0x2d, 0x01, 0, 0, 0xaa, 0, rate, REPO_LDAC_STEREO};
-    memcpy(ldac.cie.vendor_info, ldac_cie, sizeof(ldac_cie));
-    esp_err_t err = esp_a2d_source_register_stream_endpoint(0, &ldac);
-    if (err != ESP_OK) return err;
+esp_err_t BtEncoder::register_endpoints(bool ldac_enabled) {
+    // Lowest endpoint index wins when we initiate negotiation. Without LDAC, AAC and SBC take
+    // SEIDs 0 and 1 so the registered endpoints stay contiguous, as in ESP-IDF's examples.
+    esp_err_t err = ESP_OK;
+    uint8_t seid = 0;
+    if (ldac_enabled) {
+        esp_a2d_mcc_t ldac{};
+        ldac.type = ESP_A2D_MCT_NON_A2DP;
+        const uint8_t rate = AudioPipe::sample_rate() == 48000 ? REPO_LDAC_RATE_48000 : REPO_LDAC_RATE_44100;
+        const uint8_t ldac_cie[8] = {0x2d, 0x01, 0, 0, 0xaa, 0, rate, REPO_LDAC_STEREO};
+        memcpy(ldac.cie.vendor_info, ldac_cie, sizeof(ldac_cie));
+        err = esp_a2d_source_register_stream_endpoint(seid++, &ldac);
+        if (err != ESP_OK) return err;
+    }
     esp_a2d_mcc_t aac{};
     aac.type = ESP_A2D_MCT_M24;
     auto& a = aac.cie.m24_info;
@@ -44,7 +49,7 @@ esp_err_t BtEncoder::register_endpoints() {
     a.br1 = (AAC_BITRATE >> 16) & ESP_A2D_M24_CIE_BR1_MSK;
     a.br2 = (AAC_BITRATE >> 8) & ESP_A2D_M24_CIE_BR2_MSK;
     a.br3 = AAC_BITRATE & ESP_A2D_M24_CIE_BR3_MSK;
-    err = esp_a2d_source_register_stream_endpoint(1, &aac);
+    err = esp_a2d_source_register_stream_endpoint(seid++, &aac);
     if (err != ESP_OK) return err;
 
     esp_a2d_mcc_t sbc{};
@@ -58,7 +63,7 @@ esp_err_t BtEncoder::register_endpoints() {
     s.alloc_mthd = ESP_A2D_SBC_CIE_ALLOC_MTHD_LOUDNESS;
     s.min_bitpool = 2;
     s.max_bitpool = 53;
-    return esp_a2d_source_register_stream_endpoint(2, &sbc);
+    return esp_a2d_source_register_stream_endpoint(seid, &sbc);
 }
 
 bool BtEncoder::configure(const esp_a2d_mcc_t& codec) {
@@ -146,7 +151,8 @@ const char* BtEncoder::codec_name() const {
 }
 
 void BtEncoder::set_ldac_quality(LdacQuality quality) {
-    if (ldac_quality_ == quality) return;
+    // OFF only changes endpoint registration at boot; it is not an encoder mode.
+    if (quality == LdacQuality::OFF || ldac_quality_ == quality) return;
     if (ldac_) stop();
     ldac_quality_ = quality;
     if (ldac_) bitrate_bps_ = 0;

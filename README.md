@@ -102,8 +102,11 @@ Assistant panel shows the actual incoming codec and resolution. LDAC quality is 
 | High | 909 kbit/s | 990 kbit/s |
 | Balanced (default) | 606 kbit/s | 660 kbit/s |
 | Connection priority | 303 kbit/s | 330 kbit/s |
+| Off | AAC/SBC only | AAC/SBC only |
 
-Quality changes apply without a reboot. Higher rates increase shared-radio bandwidth and can
+Quality changes apply without a reboot. **Off** does not offer LDAC to the speaker at all, so it
+negotiates AAC or SBC instead. Use it if a speaker picks LDAC but its encoder fails to start, which
+shows up as repeated "encoder failed" reconnects in the log. Turning LDAC off or on restarts the bridge. Higher rates increase shared-radio bandwidth and can
 stutter even when encoding is fast enough. The bitrate display is the codec rate, not Wi-Fi throughput.
 LDAC encoding runs on core 1 and processes a transport packet per wake-up. Its float analysis
 uses hardware square roots. Playback progress reports PCM consumption against a cumulative
@@ -125,7 +128,9 @@ After flashing, check LDAC-, AAC- and SBC-capable speakers and verify the displa
 then test volume/mute, power-save resume, reconnect and sync against another Sendspin player.
 
 LDAC uses the pinned Sony/AOSP encoder in `components/libldac` (Apache 2.0; upstream LICENSE
-and NOTICE retained). Negotiation and media framing adapt the receiver project's transport
+and NOTICE retained). Sony's NOTICE says LDAC in a commercial product needs Sony's
+[certification](https://www.sony.net/Products/LDAC/aosp/); this is a hobby project, so anyone
+building a product from it must handle that themselves. Negotiation and media framing adapt the receiver project's transport
 overlay to an A2DP source. CMake compiles checked, generated SDK copies inside the build
 directory; it never patches the shared ESP-IDF installation. Header/codec arrays are extended
 consistently across Bluedroid and its consumers. Incompatible SDK changes fail configuration.
@@ -192,7 +197,7 @@ encoder and PCM-underrun counters retain their existing lifetimes.
 Capture status once per second and save the final log with:
 
 ```bash
-python scripts/capture_audio_diagnostics.py 192.168.31.197 --seconds 90 --output .pio/audio-capture
+python scripts/capture_audio_diagnostics.py <bridge-ip> --seconds 90 --output .pio/audio-capture
 uv run --python 3.11 --with ziglang python tests/run_transport_diag_host.py
 ```
 
@@ -222,11 +227,22 @@ This is a port; the design, behaviour and defaults come from these projects:
   the Bluetooth code follows.
 - **[pioarduino](https://github.com/pioarduino/platform-espressif32)**, the PlatformIO platform
   that supports the ESP32-S31.
+- **[libldac](https://android.googlesource.com/platform/external/libldac/)**, Sony's LDAC encoder
+  from the Android Open Source Project (Apache 2.0), vendored in `components/libldac`.
+- **[esp_audio_codec](https://components.espressif.com/components/espressif/esp_audio_codec)**,
+  Espressif's AAC and SBC encoders.
+- LDAC and AAC/SBC output, the Bluedroid LDAC transport overlay and the diagnostics were
+  contributed and hardware-tested by Simon ([techfoundrynz](https://github.com/techfoundrynz)).
 
 ## License
 
 MIT, see [LICENSE](LICENSE). It keeps the original sendspin-bt-bridge copyright notice.
-Dependencies fetched at build time keep their own licenses.
+Dependencies keep their own licenses:
+- sendspin-cpp and ESP-IDF: Apache 2.0
+- the vendored libldac: Apache 2.0, with its LICENSE and NOTICE in `components/libldac`
+- `espressif/esp_audio_codec`: the Espressif Modified MIT License, which permits use **only with
+  Espressif chips**. That is fine for this firmware, but that code cannot be reused on other
+  hardware.
 
 ## Layout
 

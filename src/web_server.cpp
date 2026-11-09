@@ -482,6 +482,8 @@ esp_err_t handle_post_config(httpd_req_t* req) {
                                  before.server_url != after.server_url ||
                                  before.audio_sample_rate != after.audio_sample_rate ||
                                  before.audio_bit_depth != after.audio_bit_depth ||
+                                 ((before.ldac_quality == LdacQuality::OFF) !=
+                                  (after.ldac_quality == LdacQuality::OFF)) ||
                                  before.min_buffer_ms != after.min_buffer_ms ||
                                  before.lead_time_ms != after.lead_time_ms;
     if (g_actions.settings_changed) {

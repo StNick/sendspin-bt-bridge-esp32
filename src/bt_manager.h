@@ -149,6 +149,7 @@ private:
     esp_a2d_conn_hdl_t audio_connection_{0};
     uint16_t audio_mtu_{0};
     uint8_t registered_seps_{0};
+    uint8_t required_seps_{0b111};  // LDAC, AAC, SBC; just AAC, SBC (SEIDs 0-1) when LDAC is off
 
     // bt_app task state
     bool has_target_{false};

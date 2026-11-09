@@ -174,7 +174,13 @@ int main() {
     caps[3] = 0x4f;  // Another vendor must never enter the LDAC transport.
     assert(!repo_ldac_info_known(caps));
     BtEncoder encoder;
-    assert(BtEncoder::register_endpoints() == ESP_OK);
+    // LDAC off: AAC and SBC take the first two endpoint IDs, with nothing left in the third.
+    memset(endpoints, 0xee, sizeof(endpoints));  // sentinel: SBC is type 0
+    assert(BtEncoder::register_endpoints(false) == ESP_OK);
+    assert(endpoints[0].type == ESP_A2D_MCT_M24 && endpoints[1].type == ESP_A2D_MCT_SBC &&
+           endpoints[2].type == 0xee);
+    encoder.set_ldac_quality(LdacQuality::OFF);  // not an encoder mode; must be ignored
+    assert(BtEncoder::register_endpoints(true) == ESP_OK);
     assert(endpoints[0].type == ESP_A2D_MCT_NON_A2DP && endpoints[1].type == ESP_A2D_MCT_M24 &&
            endpoints[2].type == ESP_A2D_MCT_SBC);
     auto aac = endpoints[1];
@@ -277,7 +283,7 @@ int main() {
             assert(AudioPipe::configure_format(rate, bits));
             assert(AudioPipe::frames_to_us(rate) == 1000000);
             assert(AudioPipe::bytes_per_frame() == 2 * (bits / 8));
-            assert(BtEncoder::register_endpoints() == ESP_OK);
+            assert(BtEncoder::register_endpoints(true) == ESP_OK);
             assert(endpoints[0].cie.vendor_info[6] == (rate == 44100 ? 0x20 : 0x10));
             auto fallback = endpoints[1];
             fallback.cie.m24_info.obj_type = ESP_A2D_M24_CIE_OBJ_TYPE_4_AAC_LC;

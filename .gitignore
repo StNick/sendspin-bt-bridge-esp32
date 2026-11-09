@@ -6,3 +6,4 @@ sdkconfig.esp32-s31.old
 .vscode/
 __pycache__/
 .gitignore.optional
+CLAUDE.local.md

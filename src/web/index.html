@@ -126,10 +126,10 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:
         <div><label for="c-pin">Legacy Bluetooth PIN</label><input type="text" id="c-pin" maxlength="16"></div>
         <div><label for="c-rate">Music Assistant sample rate</label><select id="c-rate"><option value="44100">44.1 kHz</option><option value="48000">48 kHz</option></select></div>
         <div><label for="c-bits">Music Assistant bit depth</label><select id="c-bits"><option value="16">16-bit</option><option value="24">24-bit</option></select></div>
-        <div><label for="c-ldac">LDAC quality</label><select id="c-ldac"><option value="high">High — 909 / 990 kbit/s</option><option value="standard">Balanced — 606 / 660 kbit/s</option><option value="connection">Connection priority — 303 / 330 kbit/s</option></select></div>
+        <div><label for="c-ldac">LDAC quality</label><select id="c-ldac"><option value="high">High — 909 / 990 kbit/s</option><option value="standard">Balanced — 606 / 660 kbit/s</option><option value="connection">Connection priority — 303 / 330 kbit/s</option><option value="off">Off — use AAC / SBC</option></select></div>
         <div><label for="c-web">Web UI password (user "admin")</label><input type="password" id="c-web" maxlength="64" placeholder="unchanged"></div>
       </div>
-      <p class="muted">FLAC is preferred for lossless input. Rate and depth changes restart the bridge; the speaker must support the chosen rate. LDAC uses the selected depth; AAC/SBC use 16-bit. LDAC bitrates shown are for 44.1 / 48 kHz. Higher settings use more wireless bandwidth.</p>
+      <p class="muted">FLAC is preferred for lossless input. Rate and depth changes restart the bridge; the speaker must support the chosen rate. LDAC uses the selected depth; AAC/SBC use 16-bit. LDAC bitrates shown are for 44.1 / 48 kHz. Higher settings use more wireless bandwidth. Turning LDAC off or on restarts the bridge.</p>
       <div class="row"><button type="submit" class="primary">Save</button><span class="muted" id="cfg-note"></span></div>
     </form>
   </section>

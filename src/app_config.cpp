@@ -64,7 +64,7 @@ void sanitize(AppConfig& c) {
     if (c.bt_pin.empty() || c.bt_pin.size() > 16) {
         c.bt_pin = "0000";
     }
-    if (static_cast<uint8_t>(c.ldac_quality) > static_cast<uint8_t>(LdacQuality::CONNECTION)) {
+    if (static_cast<uint8_t>(c.ldac_quality) > static_cast<uint8_t>(LdacQuality::OFF)) {
         c.ldac_quality = LdacQuality::STANDARD;
     }
     if (static_cast<uint8_t>(c.idle_mode) > static_cast<uint8_t>(IdleMode::KEEP_ALIVE)) {
@@ -156,6 +156,7 @@ const char* ldac_quality_name(LdacQuality quality) {
     switch (quality) {
         case LdacQuality::STANDARD: return "standard";
         case LdacQuality::CONNECTION: return "connection";
+        case LdacQuality::OFF: return "off";
         default: return "high";
     }
 }
@@ -164,6 +165,7 @@ bool ldac_quality_from_name(const std::string& name, LdacQuality* out) {
     if (name == "high") *out = LdacQuality::HIGH;
     else if (name == "standard") *out = LdacQuality::STANDARD;
     else if (name == "connection") *out = LdacQuality::CONNECTION;
+    else if (name == "off") *out = LdacQuality::OFF;
     else return false;
     return true;
 }
