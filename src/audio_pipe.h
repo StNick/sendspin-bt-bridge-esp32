@@ -1,8 +1,8 @@
 // PCM hand-off between the Sendspin sync task (producer, on_audio_write) and the Bluetooth
-// A2DP source data callback (consumer).
+// AAC/SBC encoder worker (consumer).
 //
-// Format is fixed at 44.1 kHz / 16-bit / stereo: Bluedroid's A2DP source advertises only
-// 44.1 kHz SBC (bta_av_co_sbc_caps), and the bridge advertises only that PCM format to Sendspin,
+// Format is fixed at 44.1 kHz / 16-bit / stereo: our AAC and SBC endpoints advertise only
+// 44.1 kHz, and the bridge advertises only that PCM format to Sendspin,
 // so the server resamples and no resampler is needed on the device.
 #pragma once
 

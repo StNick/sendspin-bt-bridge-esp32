@@ -1,6 +1,6 @@
 // Bluetooth Classic A2DP source for one speaker: discovery, pairing, connection with the
 // original bridge's reconnect backoff, media start/suspend, AVRCP absolute volume and speaker
-// button forwarding, plus the PCM data callback that drains the AudioPipe.
+// button forwarding, plus an AAC/SBC encoder worker that drains the AudioPipe.
 //
 // All Bluedroid callbacks are copied onto a queue and handled on one "bt_app" task, so the
 // state below is only touched from that task. Public methods are thread-safe and asynchronous.
@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "app_config.h"
+#include "bt_encoder.h"
 #include "esp_a2dp_api.h"
 #include "esp_avrc_api.h"
 #include "esp_err.h"
@@ -56,14 +57,17 @@ struct BtStatus {
     int rssi_dbm{0};           // HCI Read RSSI: dB relative to the golden range (0 = ideal)
     int delay_report_ms{-1};   // AVDTP sink delay report, -1 if none received
     bool mono_sink{false};
+    std::string codec;
+    uint32_t bitrate_bps{0};
+    BtEncoder::Metrics encoder_metrics{};
     std::string last_event;
 };
 
 class BtManager {
 public:
     struct Callbacks {
-        // A2DP source task: real (non-filler) frames just handed to the encoder and the client
-        // time at which the last of them leaves the encoder. Must be fast and non-blocking.
+        // Encoder worker: real (non-filler) frames accepted by A2DP and the estimated client
+        // time of their last sample. Must be fast and non-blocking.
         std::function<void(uint32_t frames, int64_t finish_us)> frames_played;
         // bt_app task: the speaker changed its own volume (AVRCP absolute volume), 0-100.
         std::function<void(uint8_t volume)> speaker_volume;
@@ -90,6 +94,7 @@ public:
     void keepalive_burst(KeepAliveMethod method);
     void set_policy(uint16_t check_interval_s, uint16_t max_reconnect_fails);
     void set_pin(const std::string& pin);
+    void set_ldac_quality(LdacQuality quality);
 
     BtStatus status();
     bool is_connected() const {
@@ -97,9 +102,6 @@ public:
     }
     /// True while the A2DP encoder is pulling PCM from the pipe (callback seen in the last 150 ms).
     bool consuming() const;
-
-    // Static trampolines for Bluedroid (public so the C callbacks can reach them).
-    static int32_t a2d_data_cb(uint8_t* data, int32_t len);
 
 private:
     BtManager() = default;
@@ -129,6 +131,7 @@ private:
 
     void fill_idle(uint8_t* dst, size_t bytes, int channels);
     void apply_gain(int16_t* samples, size_t count);
+    uint32_t read_pcm(uint8_t* data, size_t len);
 
     // Bluedroid callbacks (run on the BTC task): copy and queue.
     static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t* param);
@@ -139,6 +142,10 @@ private:
     AudioPipe* pipe_{nullptr};
     Callbacks callbacks_;
     QueueHandle_t queue_{nullptr};
+    BtEncoder encoder_;
+    esp_a2d_conn_hdl_t audio_connection_{0};
+    uint16_t audio_mtu_{0};
+    uint8_t registered_seps_{0};
 
     // bt_app task state
     bool has_target_{false};

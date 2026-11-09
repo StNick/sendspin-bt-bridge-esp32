@@ -4,3 +4,5 @@ build.log
 sdkconfig.esp32-s31
 sdkconfig.esp32-s31.old
 .vscode/
+__pycache__/
+.gitignore.optional

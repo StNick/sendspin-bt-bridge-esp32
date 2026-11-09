@@ -26,6 +26,10 @@ enum class KeepAliveMethod : uint8_t {
     NONE = 2,        // no burst
 };
 
+enum class LdacQuality : uint8_t { HIGH = 0, STANDARD = 1, CONNECTION = 2 };
+const char* ldac_quality_name(LdacQuality quality);
+bool ldac_quality_from_name(const std::string& name, LdacQuality* out);
+
 const char* idle_mode_name(IdleMode mode);
 bool idle_mode_from_name(const std::string& name, IdleMode* out);
 const char* keepalive_method_name(KeepAliveMethod method);
@@ -44,6 +48,7 @@ struct AppConfig {
     std::array<uint8_t, 6> speaker_bda{};
     std::string speaker_name;
     std::string bt_pin{"0000"};  // legacy (pre-2.1) PIN pairing only
+    LdacQuality ldac_quality{LdacQuality::STANDARD};
 
     // Idle behaviour
     IdleMode idle_mode{IdleMode::DEFAULT};

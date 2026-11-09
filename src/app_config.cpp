@@ -64,6 +64,9 @@ void sanitize(AppConfig& c) {
     if (c.bt_pin.empty() || c.bt_pin.size() > 16) {
         c.bt_pin = "0000";
     }
+    if (static_cast<uint8_t>(c.ldac_quality) > static_cast<uint8_t>(LdacQuality::CONNECTION)) {
+        c.ldac_quality = LdacQuality::STANDARD;
+    }
     if (static_cast<uint8_t>(c.idle_mode) > static_cast<uint8_t>(IdleMode::KEEP_ALIVE)) {
         c.idle_mode = IdleMode::DEFAULT;
     }
@@ -107,6 +110,7 @@ esp_err_t write_all(const AppConfig& c) {
     check(nvs_set_blob(h, "spk_bda", c.speaker_bda.data(), c.speaker_bda.size()));
     check(nvs_set_str(h, "spk_name", c.speaker_name.c_str()));
     check(nvs_set_str(h, "bt_pin", c.bt_pin.c_str()));
+    check(nvs_set_u8(h, "ldac_quality", static_cast<uint8_t>(c.ldac_quality)));
     check(nvs_set_u8(h, "idle_mode", static_cast<uint8_t>(c.idle_mode)));
     check(nvs_set_u16(h, "ps_delay", c.power_save_delay_min));
     check(nvs_set_u16(h, "idle_disc", c.idle_disconnect_min));
@@ -141,6 +145,22 @@ const char* idle_mode_name(IdleMode mode) {
         default:
             return "default";
     }
+}
+
+const char* ldac_quality_name(LdacQuality quality) {
+    switch (quality) {
+        case LdacQuality::STANDARD: return "standard";
+        case LdacQuality::CONNECTION: return "connection";
+        default: return "high";
+    }
+}
+
+bool ldac_quality_from_name(const std::string& name, LdacQuality* out) {
+    if (name == "high") *out = LdacQuality::HIGH;
+    else if (name == "standard") *out = LdacQuality::STANDARD;
+    else if (name == "connection") *out = LdacQuality::CONNECTION;
+    else return false;
+    return true;
 }
 
 bool idle_mode_from_name(const std::string& name, IdleMode* out) {
@@ -211,6 +231,7 @@ esp_err_t init() {
         }
         c.speaker_name = read_str(h, "spk_name", "");
         c.bt_pin = read_str(h, "bt_pin", "0000");
+        c.ldac_quality = static_cast<LdacQuality>(read_u8(h, "ldac_quality", 1));
         c.idle_mode = static_cast<IdleMode>(read_u8(h, "idle_mode", 0));
         c.power_save_delay_min = read_u16(h, "ps_delay", 1);
         c.idle_disconnect_min = read_u16(h, "idle_disc", 0);

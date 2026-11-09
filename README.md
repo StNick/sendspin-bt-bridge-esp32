@@ -12,8 +12,8 @@ ESP-IDF, not a line-by-line translation:
 | Original (Linux)                                   | This port (ESP32-S31)                                                    |
 |----------------------------------------------------|--------------------------------------------------------------------------|
 | aiosendspin (Python) per speaker subprocess        | [sendspin-cpp](https://github.com/Sendspin/sendspin-cpp) 0.9.5, the official C++ Sendspin library |
-| BlueZ + PulseAudio A2DP                            | ESP-IDF Bluedroid A2DP source (SBC encoder) + AVRCP                      |
-| FLAC decode → GStreamer → PulseAudio sink          | sendspin-cpp decodes FLAC/PCM → ring buffer → A2DP data callback         |
+| BlueZ + PulseAudio A2DP                            | ESP-IDF Bluedroid A2DP source (LDAC → AAC → SBC preference) + AVRCP    |
+| FLAC decode → GStreamer → PulseAudio sink          | sendspin-cpp decodes FLAC/PCM → ring buffer → LDAC/AAC/SBC encoder → A2DP |
 | Flask web UI, REST API, SSE log stream             | Built-in web UI on port 80, REST API, log view                           |
 | mDNS via zeroconf                                  | ESP-IDF mDNS: `_sendspin._tcp` on port 8928, path `/sendspin`             |
 | Reconnect policy (`BT_CHECK_INTERVAL`, backoff, `BT_MAX_RECONNECT_FAILS`) | Same formula: `min(interval · 2^max(0, attempt−3), 300 s)` |
@@ -35,9 +35,7 @@ ESP-IDF, not a line-by-line translation:
 - **Music Assistant REST API integration (login, groups API, `VOLUME_VIA_MA`) and Home Assistant
   MQTT/REST integration.** Now-playing, transport and volume come over Sendspin itself (metadata
   and controller roles). The player is visible to Home Assistant through Music Assistant.
-- **Codecs other than SBC.** ESP-IDF's built-in A2DP source encoder is SBC only, at 44.1 kHz.
-  aptX and LDAC are proprietary and not available in ESP-IDF. AAC is possible on the S31 through
-  ESP-IDF's external-codec A2DP path (see its `a2dp_source_aac` example) but is not implemented here.
+- **aptX.** Not implemented. Bluetooth output supports LDAC, AAC-LC and SBC.
 - **Latency calibration tools, demo mode, HA add-on packaging, LXC/Docker deployment** have no
   counterpart on a microcontroller.
 
@@ -57,6 +55,9 @@ ESP32-S31 support is only in the community [pioarduino](https://github.com/pioar
 platform (`61.04.00-RC1`, which bundles ESP-IDF 6.1.0). It is pinned in `platformio.ini`; PlatformIO
 downloads it, the RISC-V toolchain and the components (versions locked in `dependencies.lock`) on
 the first build.
+
+Use **pioarduino Core 6.2.0** (`python -m pip install "pioarduino==6.2.0"`). The upstream
+PlatformIO 6.1 core does not meet this platform's requirements.
 
 ```bash
 pio run                       # build
@@ -83,6 +84,32 @@ using `.pio/build/esp32-s31/firmware.bin`).
 
 ## Sync and latency
 
+Bluetooth codec negotiation prefers **LDAC**, then **AAC-LC**
+(up to 160 kbit/s), then **SBC**. All use the existing 44.1 kHz, 16-bit PCM pipeline.
+LDAC requires stereo; AAC and SBC support mono down-mixing when negotiated. A speaker must
+advertise a compatible LDAC endpoint; some speakers require HD audio/LDAC to be enabled in
+their companion app. The connection log lists advertised endpoints and LDAC rate/channel masks.
+The speaker panel shows the Bluetooth codec and encoder bitrate, separately from the incoming
+Sendspin codec. LDAC quality is saved in Settings: High (909 kbit/s), Balanced
+(default, 606 kbit/s), or Connection priority (303 kbit/s). Quality changes apply without a reboot.
+These are LDAC's 44.1 kHz rates; 990/660/330 kbit/s requires a 48 kHz output pipeline, which
+this bridge does not advertise. The bitrate display is the codec rate, not Wi-Fi throughput.
+LDAC encoding runs on core 1 and processes a transport packet per wake-up. Its float analysis
+uses hardware square roots. `/api/status` includes encoder timing, late-batch, send-retry and
+packet-drop counters to distinguish CPU pressure from Bluetooth backpressure.
+When upgrading an existing checkout, enable `BT_A2DP_USE_EXTERNAL_CODEC` and
+`BT_A2DP_CODEC_AAC_ENABLED` and set `BT_A2DP_SEP_NUM_MAX` to 3 in the generated
+`sdkconfig.esp32-s31`, or regenerate it from `sdkconfig.defaults` (preserve any board overrides).
+Codec playback, fallback, reconnect and suspend/resume require hardware validation.
+After flashing, check LDAC-, AAC- and SBC-capable speakers and verify the displayed codec,
+then test volume/mute, power-save resume, reconnect and sync against another Sendspin player.
+
+LDAC uses the pinned Sony/AOSP encoder in `components/libldac` (Apache 2.0; upstream LICENSE
+and NOTICE retained). Negotiation and media framing adapt the receiver project's transport
+overlay to an A2DP source. CMake compiles checked, generated SDK copies inside the build
+directory; it never patches the shared ESP-IDF installation. Header/codec arrays are extended
+consistently across Bluedroid and its consumers. Incompatible SDK changes fail configuration.
+
 Bluetooth adds latency that the bridge cannot measure. Each speaker starts with a **static delay**
 of 125 ms (the original bridge's SBC fallback). If the speaker sends an AVDTP delay report, that
 value replaces it once. Adjust it under **Now playing → Static delay** (or from Music Assistant)
@@ -100,8 +127,23 @@ until the speaker lines up with your other players; the value is kept across reb
 
 ## Status
 
-Builds cleanly against ESP-IDF 6.1.0 for the ESP32-S31. It has **not yet been tested on
-hardware**; reports from S31 owners are welcome.
+Host encoder regression checks (requires the installed ESP-IDF headers) run with:
+
+```bash
+uv run --with ziglang python tests/run_bt_encoder_host.py
+python -m unittest discover -s tests -p test_ldac_overlay.py
+```
+
+These use the real LDAC encoder, AAC/SBC and FreeRTOS test doubles, and checked SDK transforms
+to verify bitstream framing, buffered PCM accounting, retry ownership, timestamps, resume,
+MTU rejection, cleanup and isolation from other projects. They do not validate the Bluetooth radio.
+
+Builds against ESP-IDF 6.1.0 for the ESP32-S31. Boot, 16 MB PSRAM, networking, SBC negotiation
+and LDAC playback to an Edifier M60 have been checked on hardware. The optimized 606 kbit/s
+mode played smoothly with no late batches, send retries or dropped packets in the observed
+session. The 909 kbit/s mode encoded within its CPU budget but caused Bluetooth queue pressure
+and sync losses on that setup, so 606 kbit/s remains the default. AAC radio playback and other
+speaker combinations still require validation.
 
 ## Credits
 
@@ -133,7 +175,10 @@ platformio.ini        pioarduino platform, board, partitions
 sdkconfig.defaults    Bluetooth Classic, PSRAM, Sendspin roles, networking
 partitions.csv        NVS + two 3 MB OTA slots
 src/main.cpp          Sendspin client, idle machine, glue between the parts
-src/bt_manager.*      Bluedroid A2DP source, AVRCP, GAP, reconnect policy, PCM callback
+src/bt_manager.*      Bluedroid A2DP source, AVRCP, GAP, reconnect policy
+src/bt_encoder.*      LDAC/AAC/SBC negotiation, software encoding, paced A2DP delivery
+components/libldac/   pinned Sony/AOSP LDAC encoder with upstream license/notice
+scripts/              checked project-local Bluedroid source overlay and protocol helpers
 src/audio_pipe.*      PCM ring buffer between the Sendspin decoder and Bluetooth
 src/wifi_manager.*    Wi-Fi station / setup access point, mDNS
 src/web_server.*      REST API; src/web/index.html is the UI

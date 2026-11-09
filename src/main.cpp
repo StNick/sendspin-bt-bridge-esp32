@@ -3,12 +3,12 @@
 // A firmware port of trudenboy/sendspin-bt-bridge: the device appears in Music Assistant as a
 // Sendspin player and plays to one Bluetooth (A2DP) speaker. The Linux original runs one
 // aiosendspin subprocess per speaker on PulseAudio/BlueZ; here sendspin-cpp decodes and
-// synchronises the stream and Bluedroid's A2DP source encodes it to SBC.
+// synchronises the stream and an encoder worker supplies LDAC/AAC/SBC to Bluedroid.
 //
 // Threads:
 //   main loop (this task)  Sendspin client loop and callbacks, idle machine, all Sendspin calls
 //   sendspin tasks         protocol, sync/decode (writes PCM into the AudioPipe)
-//   BTC task               A2DP data callback (reads PCM from the AudioPipe)
+//   bt_encode              paced LDAC/AAC/SBC encoding (reads PCM from the AudioPipe)
 //   bt_app                 Bluetooth state machine
 //   pump                   drains the AudioPipe in real time while no speaker is consuming it
 //   httpd                  web UI / REST API
@@ -54,7 +54,7 @@ constexpr int64_t VOLUME_SAVE_DELAY_US = 5 * US_PER_S;
 AudioPipe g_pipe;
 std::unique_ptr<SendspinClient> g_client;
 PlayerRole* g_player = nullptr;  // main loop
-// The same pointer for the BTC (A2DP data callback) and pump tasks. Set only after start()
+// The same pointer for the encoder and pump tasks. Set only after start()
 // succeeds; notify_audio_played() is the only call made through it.
 std::atomic<PlayerRole*> g_player_rt{nullptr};
 ControllerRole* g_controller = nullptr;
@@ -640,6 +640,9 @@ WebActions make_web_actions() {
     a.settings_changed = [](const AppConfig& before, const AppConfig& after) {
         app_state::post([before, after] {
             g_cfg = after;
+            if (before.ldac_quality != after.ldac_quality) {
+                BtManager::instance().set_ldac_quality(after.ldac_quality);
+            }
             if (before.require_pairing != after.require_pairing && g_client != nullptr) {
                 g_client->set_unpaired_access_enabled(!after.require_pairing);
             }

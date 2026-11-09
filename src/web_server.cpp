@@ -222,6 +222,13 @@ esp_err_t handle_status(httpd_req_t* req) {
         bt["delay_report_ms"] = b.delay_report_ms;
     }
     bt["mono_sink"] = b.mono_sink;
+    bt["codec"] = b.codec;
+    bt["bitrate_bps"] = b.bitrate_bps;
+    bt["encoder_avg_us"] = b.encoder_metrics.encode_avg_us;
+    bt["encoder_max_us"] = b.encoder_metrics.encode_max_us;
+    bt["encoder_late_batches"] = b.encoder_metrics.late_batches;
+    bt["send_retries"] = b.encoder_metrics.send_retries;
+    bt["dropped_packets"] = b.encoder_metrics.dropped_packets;
     bt["last_event"] = b.last_event;
     JsonArray results = bt["scan_results"].to<JsonArray>();
     for (const auto& r : b.scan_results) {
@@ -292,6 +299,7 @@ esp_err_t handle_get_config(httpd_req_t* req) {
     doc["bt_check_interval_s"] = c.bt_check_interval_s;
     doc["bt_max_reconnect_fails"] = c.bt_max_reconnect_fails;
     doc["bt_pin"] = c.bt_pin;
+    doc["ldac_quality"] = ldac_quality_name(c.ldac_quality);
     doc["min_buffer_ms"] = c.min_buffer_ms;
     doc["lead_time_ms"] = c.lead_time_ms;
     doc["web_password_set"] = !c.web_password.empty();
@@ -359,6 +367,12 @@ esp_err_t handle_post_config(httpd_req_t* req) {
     if (in["require_pairing"].is<bool>()) {
         c.require_pairing = in["require_pairing"].as<bool>();
     }
+    if (!in["ldac_quality"].isNull()) {
+        if (!in["ldac_quality"].is<const char*>() ||
+            !ldac_quality_from_name(in["ldac_quality"].as<std::string>(), &c.ldac_quality)) {
+            return send_error(req, "400 Bad Request", "unknown ldac_quality");
+        }
+    }
     if (in["idle_mode"].is<const char*>()) {
         if (!idle_mode_from_name(in["idle_mode"].as<std::string>(), &c.idle_mode)) {
             return send_error(req, "400 Bad Request", "unknown idle_mode");
@@ -411,6 +425,7 @@ esp_err_t handle_post_config(httpd_req_t* req) {
         cur.min_buffer_ms = c.min_buffer_ms;
         cur.lead_time_ms = c.lead_time_ms;
         cur.bt_pin = c.bt_pin;
+        cur.ldac_quality = c.ldac_quality;
         cur.web_password = c.web_password;
     });
     if (save_err != ESP_OK) {

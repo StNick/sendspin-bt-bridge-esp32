@@ -29,6 +29,8 @@ button:disabled{opacity:.5;cursor:default}
 input[type=range]{width:100%}
 label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
 input[type=text],input[type=password],input[type=number],select{width:100%;padding:7px 9px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit}
+select{-webkit-appearance:none;appearance:none;padding-right:36px;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 17px) 50%,calc(100% - 12px) 50%;background-size:5px 5px;background-repeat:no-repeat}
+@media(forced-colors:active){select{-webkit-appearance:menulist;appearance:auto;background-image:none}}
 .check{display:flex;gap:8px;align-items:center;color:var(--fg);font-size:14px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
 ul.devices{list-style:none;padding:0;margin:8px 0 0;max-height:260px;overflow:auto}
@@ -122,6 +124,7 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:
         <div><label for="c-buf">Buffer (ms)</label><input type="number" id="c-buf" min="100" max="3000"></div>
         <div><label for="c-lead">Startup lead time (ms)</label><input type="number" id="c-lead" min="0" max="5000"></div>
         <div><label for="c-pin">Legacy Bluetooth PIN</label><input type="text" id="c-pin" maxlength="16"></div>
+        <div><label for="c-ldac">LDAC quality (44.1 kHz)</label><select id="c-ldac"><option value="high">High — 909 kbit/s</option><option value="standard">Balanced — 606 kbit/s</option><option value="connection">Connection priority — 303 kbit/s</option></select></div>
         <div><label for="c-web">Web UI password (user "admin")</label><input type="password" id="c-web" maxlength="64" placeholder="unchanged"></div>
       </div>
       <div class="row"><button type="submit" class="primary">Save</button><span class="muted" id="cfg-note"></span></div>
@@ -241,6 +244,8 @@ function render(s) {
   kv($("bt-kv"), [
     ["Name", bt.speaker_name || (bt.has_speaker ? "(unnamed)" : "")],
     ["Address", bt.speaker_mac],
+    ["Bluetooth codec", bt.codec || ""],
+    ["Codec bitrate", bt.connected && bt.bitrate_bps > 0 ? (bt.bitrate_bps / 1000).toLocaleString(undefined, {maximumFractionDigits: 1}) + " kbit/s" : ""],
     ["Signal (RSSI)", bt.rssi_dbm !== undefined ? (bt.rssi_dbm === 0 ? "good (inside ideal range)" : (bt.rssi_dbm > 0 ? "+" : "") + bt.rssi_dbm + " dB vs. ideal range") : ""],
     ["Volume control", bt.connected ? (bt.abs_volume ? "Speaker (AVRCP absolute volume)" : "Bridge (software)") : ""],
     ["Reported latency", bt.delay_report_ms !== undefined ? bt.delay_report_ms + " ms" : ""],
@@ -317,6 +322,7 @@ async function loadConfig() {
   $("c-buf").value = c.min_buffer_ms;
   $("c-lead").value = c.lead_time_ms;
   $("c-pin").value = c.bt_pin;
+  $("c-ldac").value = c.ldac_quality || "high";
   $("c-web").placeholder = c.web_password_set ? "unchanged" : "none";
   cfgLoaded = true;
 }
@@ -340,6 +346,7 @@ $("cfg-form").addEventListener("submit", async (ev) => {
     min_buffer_ms: num("c-buf"),
     lead_time_ms: num("c-lead"),
     bt_pin: $("c-pin").value,
+    ldac_quality: $("c-ldac").value,
   };
   if ($("c-pass").value) body.wifi_password = $("c-pass").value;
   if ($("c-web").value) body.web_password = $("c-web").value;
