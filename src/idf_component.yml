@@ -7,5 +7,7 @@ dependencies:
   sendspin/sendspin-cpp: "==0.9.5"
   # mDNS advertisement of _sendspin._tcp so Music Assistant discovers the player
   espressif/mdns: "==1.15.1"
+  # Software AAC and SBC encoders for Bluedroid's external-codec A2DP source
+  espressif/esp_audio_codec: "==2.6.2"
   # JSON for the web API (also a sendspin-cpp dependency)
   bblanchon/arduinojson: "==7.4.3"

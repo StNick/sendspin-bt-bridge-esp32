@@ -3,12 +3,12 @@
 // A firmware port of trudenboy/sendspin-bt-bridge: the device appears in Music Assistant as a
 // Sendspin player and plays to one Bluetooth (A2DP) speaker. The Linux original runs one
 // aiosendspin subprocess per speaker on PulseAudio/BlueZ; here sendspin-cpp decodes and
-// synchronises the stream and Bluedroid's A2DP source encodes it to SBC.
+// synchronises the stream and an encoder worker supplies LDAC/AAC/SBC to Bluedroid.
 //
 // Threads:
 //   main loop (this task)  Sendspin client loop and callbacks, idle machine, all Sendspin calls
 //   sendspin tasks         protocol, sync/decode (writes PCM into the AudioPipe)
-//   BTC task               A2DP data callback (reads PCM from the AudioPipe)
+//   bt_encode              paced LDAC/AAC/SBC encoding (reads PCM from the AudioPipe)
 //   bt_app                 Bluetooth state machine
 //   pump                   drains the AudioPipe in real time while no speaker is consuming it
 //   httpd                  web UI / REST API
@@ -29,6 +29,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "log_buffer.h"
+#include "repo_bt_diag.h"
 #include "nvs_persistence.h"
 #include "sendspin/client.h"
 #include "sendspin/controller_role.h"
@@ -46,7 +47,7 @@ const char* TAG = "bridge";
 // SBC fallback latency of the original bridge's latency model (_CODEC_FALLBACK_MS["sbc"]):
 // the starting static delay for a speaker until it sends an AVDTP delay report or is calibrated.
 constexpr uint16_t SBC_FALLBACK_DELAY_MS = 125;
-constexpr size_t PIPE_BYTES = 64 * 1024;          // ~370 ms of 44.1 kHz stereo 16-bit
+constexpr size_t PIPE_DURATION_MS = 400;
 constexpr size_t MIN_PSRAM_BYTES = 2 * 1024 * 1024;
 constexpr int64_t US_PER_S = 1000000LL;
 constexpr int64_t VOLUME_SAVE_DELAY_US = 5 * US_PER_S;
@@ -54,7 +55,7 @@ constexpr int64_t VOLUME_SAVE_DELAY_US = 5 * US_PER_S;
 AudioPipe g_pipe;
 std::unique_ptr<SendspinClient> g_client;
 PlayerRole* g_player = nullptr;  // main loop
-// The same pointer for the BTC (A2DP data callback) and pump tasks. Set only after start()
+// The same pointer for the encoder and pump tasks. Set only after start()
 // succeeds; notify_audio_played() is the only call made through it.
 std::atomic<PlayerRole*> g_player_rt{nullptr};
 ControllerRole* g_controller = nullptr;
@@ -178,16 +179,17 @@ struct PlayerListener : PlayerRoleListener {
 
     void on_stream_start() override {
         const auto& p = g_player->get_current_stream_params();
-        if (p.sample_rate.value_or(0) != AudioPipe::SAMPLE_RATE ||
+        if (p.sample_rate.value_or(0) != AudioPipe::sample_rate() ||
             p.channels.value_or(0) != AudioPipe::CHANNELS ||
-            p.bit_depth.value_or(0) != AudioPipe::BITS_PER_SAMPLE) {
-            // Cannot happen with a conforming server: only 44.1 kHz/16-bit/stereo is advertised.
+            p.bit_depth.value_or(0) != AudioPipe::bits_per_sample()) {
+            // Only the boot-selected PCM format is advertised to the server.
             ESP_LOGE(TAG, "Server chose an unadvertised format (%u Hz, %u ch, %u bit)",
                      static_cast<unsigned>(p.sample_rate.value_or(0)),
                      static_cast<unsigned>(p.channels.value_or(0)),
                      static_cast<unsigned>(p.bit_depth.value_or(0)));
         }
         g_stream_active = true;
+        BtManager::instance().set_audio_active(true);
         ESP_LOGI(TAG, "Stream started");
     }
 
@@ -195,6 +197,7 @@ struct PlayerListener : PlayerRoleListener {
         // Fired only once the sync task is idle, so nothing is writing the pipe now.
         g_pipe.clear();
         g_stream_active = false;
+        BtManager::instance().set_audio_active(false);
         g_idle_since = esp_timer_get_time();
         ESP_LOGI(TAG, "Stream ended");
     }
@@ -298,7 +301,7 @@ NetworkProvider g_network;
 // ---------------------------------------------------------------------------------------------
 
 void pump_task(void*) {
-    static uint8_t buf[512 * AudioPipe::BYTES_PER_FRAME];
+    static uint8_t buf[512 * 6];  // maximum packed 24-bit stereo
     int64_t last = esp_timer_get_time();
     uint64_t frac_num = 0;  // accumulated frames * 1e6
     while (true) {
@@ -311,13 +314,13 @@ void pump_task(void*) {
             frac_num = 0;
             continue;
         }
-        frac_num += static_cast<uint64_t>(elapsed) * AudioPipe::SAMPLE_RATE;
+        frac_num += static_cast<uint64_t>(elapsed) * AudioPipe::sample_rate();
         uint32_t due = static_cast<uint32_t>(frac_num / US_PER_S);
         frac_num %= US_PER_S;
         uint32_t drained = 0;
         while (due > 0) {
             const uint32_t chunk = due > 512 ? 512 : due;
-            const size_t got = g_pipe.read(buf, chunk * AudioPipe::BYTES_PER_FRAME) / AudioPipe::BYTES_PER_FRAME;
+            const size_t got = g_pipe.read(buf, chunk * AudioPipe::bytes_per_frame()) / AudioPipe::bytes_per_frame();
             if (got == 0) {
                 break;
             }
@@ -477,11 +480,10 @@ bool start_sendspin(const AppConfig& cfg) {
     g_client = std::make_unique<SendspinClient>(std::move(config));
 
     PlayerRoleConfig player_config;
-    // Bluedroid's A2DP source encodes 44.1 kHz stereo SBC only, so that is all we accept;
-    // FLAC first to keep Wi-Fi traffic down while sharing the radio with Bluetooth.
+    // Advertise the selected format, FLAC first to reduce shared-radio traffic.
     player_config.audio_formats = {
-        {SendspinCodecFormat::FLAC, AudioPipe::CHANNELS, AudioPipe::SAMPLE_RATE, AudioPipe::BITS_PER_SAMPLE},
-        {SendspinCodecFormat::PCM, AudioPipe::CHANNELS, AudioPipe::SAMPLE_RATE, AudioPipe::BITS_PER_SAMPLE},
+        {SendspinCodecFormat::FLAC, AudioPipe::CHANNELS, AudioPipe::sample_rate(), AudioPipe::bits_per_sample()},
+        {SendspinCodecFormat::PCM, AudioPipe::CHANNELS, AudioPipe::sample_rate(), AudioPipe::bits_per_sample()},
     };
     player_config.initial_output_delay_ms = SBC_FALLBACK_DELAY_MS;
     player_config.min_buffer_ms = cfg.min_buffer_ms;
@@ -558,6 +560,8 @@ void refresh_status() {
         g_ss.output_delay_ms = g_player->get_output_delay_ms();
         g_ss.stream_active = g_stream_active;
         const auto& p = g_player->get_current_stream_params();
+        g_ss.sample_rate = p.sample_rate.value_or(0);
+        g_ss.bit_depth = p.bit_depth.value_or(0);
         if (g_stream_active && p.codec.has_value()) {
             g_ss.stream_codec = *p.codec == SendspinCodecFormat::FLAC ? "FLAC"
                                 : *p.codec == SendspinCodecFormat::PCM ? "PCM"
@@ -640,6 +644,9 @@ WebActions make_web_actions() {
     a.settings_changed = [](const AppConfig& before, const AppConfig& after) {
         app_state::post([before, after] {
             g_cfg = after;
+            if (before.ldac_quality != after.ldac_quality) {
+                BtManager::instance().set_ldac_quality(after.ldac_quality);
+            }
             if (before.require_pairing != after.require_pairing && g_client != nullptr) {
                 g_client->set_unpaired_access_enabled(!after.require_pairing);
             }
@@ -671,7 +678,9 @@ extern "C" void app_main(void) {
              g_cfg.name.c_str());
     ESP_LOGI(TAG, "PSRAM: %u bytes", static_cast<unsigned>(heap_caps_get_total_size(MALLOC_CAP_SPIRAM)));
 
-    if (!g_pipe.init(PIPE_BYTES)) {
+    AudioPipe::configure_format(g_cfg.audio_sample_rate, g_cfg.audio_bit_depth);
+    const size_t pipe_bytes = AudioPipe::sample_rate() * PIPE_DURATION_MS / 1000 * AudioPipe::bytes_per_frame();
+    if (!g_pipe.init(pipe_bytes)) {
         ESP_LOGE(TAG, "Audio pipe allocation failed");
     }
     if (g_cfg.has_last_volume) {
@@ -734,12 +743,28 @@ extern "C" void app_main(void) {
     g_idle_since = esp_timer_get_time();
     g_last_keepalive = g_idle_since;
     int64_t next_status = 0;
+    int64_t next_transport_log = 0;
+    uint32_t last_transport_faults = 0;
     while (true) {
         app_state::run_pending();
         if (g_client != nullptr) {
             g_client->loop();
         }
         const int64_t now = esp_timer_get_time();
+        if (now >= next_transport_log) {
+            next_transport_log = now + 10000000;
+            repo_bt_diag_t d{};
+            repo_bt_diag_get(&d);
+            const uint32_t faults = d.source_rejected + d.path_dropped + d.media_write_failures;
+            if (faults > last_transport_faults) {
+                ESP_LOGW(TAG, "BT transport: queue=%lu peak=%lu rejected=%lu path_drop=%lu write_fail=%lu drain_gap=%lu us controller_gap=%lu us",
+                    (unsigned long)d.source_depth, (unsigned long)d.source_high_water,
+                    (unsigned long)d.source_rejected, (unsigned long)d.path_dropped,
+                    (unsigned long)d.media_write_failures, (unsigned long)d.source_gap_us_max,
+                    (unsigned long)d.controller_gap_us_max);
+            }
+            last_transport_faults = faults;
+        }
         run_idle_machine(now);
         save_volume_if_due(now);
         if (now >= next_status) {

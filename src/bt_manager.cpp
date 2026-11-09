@@ -13,6 +13,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_timer.h"
+#include "repo_ldac_transport.h"
 
 namespace {
 
@@ -24,9 +25,7 @@ constexpr int64_t CONNECT_TIMEOUT_US = 30LL * US_PER_S;
 constexpr int64_t MEDIA_CMD_TIMEOUT_US = 5LL * US_PER_S;
 constexpr int64_t RSSI_POLL_US = 5LL * US_PER_S;               // RSSI_BADGE polls every 5 s
 constexpr int64_t CONSUMING_WINDOW_US = 150000;                // > 2x Bluedroid's 30 ms media tick
-constexpr uint32_t KEEPALIVE_BURST_FRAMES = AudioPipe::SAMPLE_RATE;  // 1 s
 constexpr float INFRASOUND_AMPLITUDE = 100.0f;                  // _INFRASOUND_AMP
-constexpr uint32_t INFRASOUND_PERIOD_FRAMES = AudioPipe::SAMPLE_RATE / 2;  // 2 Hz
 constexpr float TWO_PI = 6.28318530717958647692f;
 constexpr size_t MAX_SCAN_RESULTS = 40;
 constexpr int64_t ABS_VOLUME_ECHO_US = 1500000;  // window for our own volume command's echo
@@ -50,6 +49,7 @@ enum class Cmd : uint8_t {
     POWER_SAVE,
     VOLUME,
     POLICY,
+    LDAC_QUALITY,
 };
 
 struct DiscResult {
@@ -116,7 +116,7 @@ uint8_t from_avrcp(uint8_t abs) {
 
 // Scratch for the mono down-mix; only the A2DP source task touches it.
 constexpr size_t SCRATCH_FRAMES = 256;
-int16_t g_scratch[SCRATCH_FRAMES * 2];
+uint8_t g_scratch[SCRATCH_FRAMES * 6];
 
 }  // namespace
 
@@ -147,6 +147,7 @@ BtManager& BtManager::instance() {
 esp_err_t BtManager::init(const AppConfig& config, AudioPipe* pipe, Callbacks callbacks) {
     pipe_ = pipe;
     callbacks_ = std::move(callbacks);
+    encoder_.set_ldac_quality(config.ldac_quality);
     check_interval_s_ = config.bt_check_interval_s;
     max_fails_ = config.bt_max_reconnect_fails;
     has_target_ = config.has_speaker;
@@ -228,9 +229,9 @@ esp_err_t BtManager::init(const AppConfig& config, AudioPipe* pipe, Callbacks ca
         ESP_LOGE(TAG, "A2DP source init failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = esp_a2d_source_register_data_callback(a2d_data_cb);
+    err = BtEncoder::register_endpoints();
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "A2DP data callback registration failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "A2DP codec registration failed: %s", esp_err_to_name(err));
         return err;
     }
 
@@ -371,7 +372,21 @@ void BtManager::gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t* param
 
 void BtManager::a2d_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t* param) {
     if (event == ESP_A2D_REPORT_SNK_ALL_CODEC_CAPS_EVT) {
-        return;  // carries a pointer freed when this callback returns; not needed
+        // This pointer is only valid during the callback. Log before returning.
+        const auto& caps = param->a2d_report_snk_all_codec_caps_stat;
+        for (uint8_t i = 0; i < caps.sep_num; ++i) {
+            const auto& codec = caps.sep_mcc[i].mcc;
+            const char* name = codec.type == ESP_A2D_MCT_SBC ? "SBC" :
+                               codec.type == ESP_A2D_MCT_M24 ? "AAC" :
+                               repo_ldac_cie_known(codec.cie.vendor_info) ? "LDAC" : "vendor";
+            ESP_LOGI(TAG, "Speaker endpoint %u: %s (codec 0x%x)", caps.sep_mcc[i].seid, name, codec.type);
+            if (codec.type == ESP_A2D_MCT_NON_A2DP) {
+                const auto* v = codec.cie.vendor_info;
+                ESP_LOGI(TAG, "Vendor caps: %02x %02x %02x %02x %02x %02x rates=%02x channels=%02x",
+                         v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
+            }
+        }
+        return;
     }
     Msg msg{};
     msg.kind = Kind::A2D;
@@ -526,7 +541,7 @@ void BtManager::tick() {
         apply_tg_filter();  // no-op until AVRCP TG init has completed
     }
 
-    if (conn_ == Conn::DISCONNECTED && has_target_ && !standby_ && !gave_up_ && !scanning_ &&
+    if (registered_seps_ == 7 && conn_ == Conn::DISCONNECTED && has_target_ && !standby_ && !gave_up_ && !scanning_ &&
         now >= next_attempt_us_) {
         start_connect();
     }
@@ -538,6 +553,20 @@ void BtManager::tick() {
     }
 
     if (conn_ == Conn::CONNECTED) {
+        if (media_ == Media::STARTED) {
+            if (encoder_.failed() || !encoder_.start(audio_connection_, audio_mtu_,
+                    [this](uint8_t* data, size_t bytes) { return read_pcm(data, bytes); },
+                    callbacks_.frames_played)) {
+                ESP_LOGE(TAG, "Bluetooth encoder failed; reconnecting");
+                encoder_.stop();
+                esp_a2d_source_disconnect(peer_.data());
+                conn_ = Conn::DISCONNECTING;
+                publish("audio encoder failed");
+                return;
+            }
+        } else {
+            encoder_.stop();
+        }
         if (want_media() && media_ == Media::IDLE && now >= next_media_us_) {
             if (esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY) == ESP_OK) {
                 media_ = Media::CHECKING;
@@ -620,6 +649,7 @@ void BtManager::handle_gap(const Msg& msg) {
             }
             break;
         case ESP_BT_GAP_READ_RSSI_DELTA_EVT:
+            if (conn_ != Conn::CONNECTED || !bda_equal(msg.u.rssi.bda, peer_.data())) break;
             if (msg.u.rssi.stat == ESP_BT_STATUS_SUCCESS) {
                 rssi_valid_ = true;
                 rssi_ = msg.u.rssi.rssi;
@@ -641,6 +671,17 @@ void BtManager::handle_a2d(const Msg& msg) {
     const int64_t now = esp_timer_get_time();
 
     switch (msg.event) {
+        case ESP_A2D_SEP_REG_STATE_EVT: {
+            const auto& sep = a2d.a2d_sep_reg_stat;
+            if (sep.seid > 2) break;
+            if (sep.reg_state == ESP_A2D_SEP_REG_SUCCESS) {
+                registered_seps_ |= 1U << sep.seid;
+            } else {
+                registered_seps_ &= ~(1U << sep.seid);
+                ESP_LOGE(TAG, "Codec endpoint %u registration failed: %d", sep.seid, sep.reg_state);
+            }
+            break;
+        }
         case ESP_A2D_CONNECTION_STATE_EVT: {
             const auto state = a2d.conn_stat.state;
             if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
@@ -677,6 +718,8 @@ void BtManager::handle_a2d(const Msg& msg) {
                 next_rssi_us_ = now + US_PER_S;
                 rssi_valid_ = false;
                 delay_report_ms_ = -1;
+                audio_connection_ = a2d.conn_stat.conn_hdl;
+                audio_mtu_ = a2d.conn_stat.audio_mtu;
                 connected_flag_.store(true);
                 ESP_LOGI(TAG, "A2DP connected to %s", target_name_.c_str());
                 publish("connected");
@@ -684,6 +727,9 @@ void BtManager::handle_a2d(const Msg& msg) {
                     callbacks_.connection(true);
                 }
             } else if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+                encoder_.clear();
+                audio_connection_ = 0;
+                audio_mtu_ = 0;
                 const Conn previous = conn_;
                 const bool was_up = connected_flag_.exchange(false);
                 const bool stale_attempt = previous == Conn::CONNECTING &&
@@ -735,11 +781,23 @@ void BtManager::handle_a2d(const Msg& msg) {
                 media_ = Media::STARTED;
                 publish("streaming");
             } else {
+                encoder_.stop();
                 // Suspended (by us or by the speaker). Restart later if we still want media.
                 media_ = Media::IDLE;
                 next_media_us_ = now + 3 * US_PER_S;
                 publish("stream suspended");
             }
+            break;
+        case ESP_A2D_AUDIO_CFG_EVT:
+            if (!has_target_ || !bda_equal(a2d.audio_cfg.remote_bda, target_.data())) break;
+            if (!encoder_.configure(a2d.audio_cfg.mcc)) {
+                ESP_LOGE(TAG, "Cannot use negotiated Bluetooth codec; disconnecting");
+                esp_a2d_source_disconnect(target_.data());
+                conn_ = Conn::DISCONNECTING;
+            }
+            // Channel layout comes from the negotiated configuration, not sink capabilities.
+            mono_.store(encoder_.mono());
+            publish();
             break;
         case ESP_A2D_MEDIA_CTRL_ACK_EVT: {
             const auto cmd = a2d.media_ctrl_stat.cmd;
@@ -783,7 +841,6 @@ void BtManager::handle_a2d(const Msg& msg) {
                                              ESP_A2D_SBC_CIE_CH_MODE_JOINT_STEREO |
                                              ESP_A2D_SBC_CIE_CH_MODE_DUAL_CHANNEL;
                 const bool mono_only = (mcc.cie.sbc_info.ch_mode & stereo_modes) == 0;
-                mono_.store(mono_only);
                 ESP_LOGI(TAG, "Speaker SBC caps: freq 0x%x ch_mode 0x%x bitpool %d-%d%s",
                          mcc.cie.sbc_info.samp_freq, mcc.cie.sbc_info.ch_mode,
                          mcc.cie.sbc_info.min_bitpool, mcc.cie.sbc_info.max_bitpool,
@@ -1016,6 +1073,9 @@ void BtManager::handle_cmd(const Msg& msg) {
             check_interval_s_ = static_cast<uint16_t>(std::max<int32_t>(5, c.a));
             max_fails_ = static_cast<uint16_t>(std::max<int32_t>(0, c.b));
             break;
+        case Cmd::LDAC_QUALITY:
+            encoder_.set_ldac_quality(static_cast<LdacQuality>(c.a));
+            break;
     }
 }
 
@@ -1025,7 +1085,7 @@ void BtManager::publish(const char* event) {
         last_event_ = event;
     }
     BtStatus s;
-    s.ready = true;
+    s.ready = registered_seps_ == 7;
     s.local_mac = local_mac_;
     s.has_target = has_target_;
     if (has_target_) {
@@ -1070,9 +1130,16 @@ void BtManager::publish(const char* event) {
     }
     s.abs_volume = abs_volume_ && rc_connected_;
     s.rssi_valid = rssi_valid_ && s.connected;
-    s.rssi_dbm = rssi_;
+    s.rssi_delta_db = rssi_;
     s.delay_report_ms = delay_report_ms_;
     s.mono_sink = mono_.load();
+    s.codec = s.connected ? encoder_.codec_name() : "";
+    s.bitrate_bps = s.connected ? encoder_.bitrate_bps() : 0;
+    s.encoder_metrics = encoder_.metrics();
+    s.sample_rate = AudioPipe::sample_rate();
+    s.pcm_bits = encoder_.pcm_bits();
+    s.pcm_buffer_ms = pipe_ ? AudioPipe::frames_to_us(pipe_->buffered_bytes() / AudioPipe::bytes_per_frame()) / 1000 : 0;
+    s.pcm_underrun_frames = pcm_underrun_frames_.load();
     s.last_event = last_event_;
 
     std::lock_guard<std::mutex> lock(status_mutex_);
@@ -1160,12 +1227,20 @@ void BtManager::set_pin(const std::string& pin) {
     pin_ = pin;
 }
 
+void BtManager::set_ldac_quality(LdacQuality quality) {
+    Msg msg{};
+    msg.kind = Kind::CMD;
+    msg.u.cmd.type = Cmd::LDAC_QUALITY;
+    msg.u.cmd.a = static_cast<int32_t>(quality);
+    post(msg, pdMS_TO_TICKS(200));
+}
+
 void BtManager::keepalive_burst(KeepAliveMethod method) {
     if (method == KeepAliveMethod::NONE) {
         return;
     }
     keepalive_method_.store(static_cast<uint8_t>(method));
-    keepalive_frames_.store(KEEPALIVE_BURST_FRAMES);
+    keepalive_frames_.store(AudioPipe::sample_rate());
 }
 
 BtStatus BtManager::status() {
@@ -1179,7 +1254,7 @@ bool BtManager::consuming() const {
 }
 
 // ---------------------------------------------------------------------------------------------
-// A2DP source data path (BTC task)
+// A2DP PCM data path (encoder worker)
 // ---------------------------------------------------------------------------------------------
 
 void BtManager::apply_gain(int16_t* samples, size_t count) {
@@ -1197,8 +1272,10 @@ void BtManager::apply_gain(int16_t* samples, size_t count) {
 }
 
 void BtManager::fill_idle(uint8_t* dst, size_t bytes, int channels) {
-    auto* out = reinterpret_cast<int16_t*>(dst);
-    const size_t frames = bytes / (static_cast<size_t>(channels) * sizeof(int16_t));
+    const uint8_t bits = encoder_.pcm_bits();
+    const size_t width = bits / 8, frame_bytes = channels * width;
+    const size_t frames = bytes / frame_bytes;
+    const uint32_t period = AudioPipe::sample_rate() / 2;
     uint32_t burst = keepalive_frames_.load(std::memory_order_relaxed);
     const bool tone = keepalive_method_.load(std::memory_order_relaxed) ==
                       static_cast<uint8_t>(KeepAliveMethod::INFRASOUND);
@@ -1206,72 +1283,45 @@ void BtManager::fill_idle(uint8_t* dst, size_t bytes, int channels) {
     if (burst > 0) {
         const size_t n = std::min<size_t>(frames, burst);
         for (; i < n; ++i) {
-            int16_t v = 0;
+            int32_t v = 0;
             if (tone) {
-                v = static_cast<int16_t>(INFRASOUND_AMPLITUDE *
-                                         sinf(TWO_PI * static_cast<float>(infrasound_phase_) /
-                                              static_cast<float>(INFRASOUND_PERIOD_FRAMES)));
-                infrasound_phase_ = (infrasound_phase_ + 1) % INFRASOUND_PERIOD_FRAMES;
+                v = static_cast<int32_t>(INFRASOUND_AMPLITUDE * 256 *
+                    sinf(TWO_PI * static_cast<float>(infrasound_phase_) / period));
+                infrasound_phase_ = (infrasound_phase_ + 1) % period;
             }
-            for (int c = 0; c < channels; ++c) {
-                out[i * channels + c] = v;
-            }
+            for (int c = 0; c < channels; ++c) pcm::write(dst + i * frame_bytes + c * width, bits, v);
         }
         keepalive_frames_.store(burst - static_cast<uint32_t>(n), std::memory_order_relaxed);
     }
-    if (i < frames) {
-        memset(out + i * channels, 0, (frames - i) * channels * sizeof(int16_t));
-    }
+    memset(dst + i * frame_bytes, 0, bytes - i * frame_bytes);
 }
 
-int32_t BtManager::a2d_data_cb(uint8_t* data, int32_t len) {
-    if (data == nullptr || len <= 0) {
-        return 0;  // len == -1 asks us to flush; we hold nothing beyond the pipe
-    }
-    BtManager& self = instance();
-    const int64_t now = esp_timer_get_time();
-    self.last_data_cb_us_.store(now, std::memory_order_relaxed);
-
-    const size_t want = static_cast<size_t>(len);
-    uint32_t real_frames = 0;
-
-    if (!self.mono_.load(std::memory_order_relaxed)) {
-        // Stereo 16-bit: same layout as the pipe.
-        size_t usable = want - (want % AudioPipe::BYTES_PER_FRAME);
-        size_t got = self.pipe_ != nullptr ? self.pipe_->read(data, usable) : 0;
-        real_frames = static_cast<uint32_t>(got / AudioPipe::BYTES_PER_FRAME);
-        self.apply_gain(reinterpret_cast<int16_t*>(data), got / sizeof(int16_t));
-        if (got < want) {
-            self.fill_idle(data + got, want - got, 2);
-        }
+uint32_t BtManager::read_pcm(uint8_t* data, size_t len) {
+    last_data_cb_us_.store(esp_timer_get_time(), std::memory_order_relaxed);
+    const bool mono = mono_.load(std::memory_order_relaxed);
+    const uint8_t bits = encoder_.pcm_bits();
+    const size_t output_frame = (mono ? 1 : 2) * (bits / 8);
+    const size_t wanted = len / output_frame;
+    size_t done = 0;
+    const uint32_t gain = gain_q16_.load(std::memory_order_relaxed);
+    if (!mono && bits == AudioPipe::bits_per_sample()) {
+        const size_t got = pipe_ ? pipe_->read(data, wanted * output_frame) : 0;
+        done = got / output_frame;
+        if (bits == 16) apply_gain(reinterpret_cast<int16_t*>(data), got / 2);
+        else if (gain != 65536) pcm::convert(data, data, done, bits, bits, false, gain);
     } else {
-        // Mono-only speaker: the encoder wants mono 16-bit; average the two channels.
-        auto* out = reinterpret_cast<int16_t*>(data);
-        const size_t frames_wanted = want / sizeof(int16_t);
-        size_t done = 0;
-        while (done < frames_wanted && self.pipe_ != nullptr) {
-            const size_t chunk = std::min(frames_wanted - done, SCRATCH_FRAMES);
-            const size_t got = self.pipe_->read(reinterpret_cast<uint8_t*>(g_scratch),
-                                                chunk * AudioPipe::BYTES_PER_FRAME) /
-                               AudioPipe::BYTES_PER_FRAME;
-            for (size_t i = 0; i < got; ++i) {
-                out[done + i] = static_cast<int16_t>(
-                    (static_cast<int32_t>(g_scratch[2 * i]) + g_scratch[2 * i + 1]) / 2);
-            }
+        while (done < wanted && pipe_) {
+            const size_t chunk = std::min(wanted - done, SCRATCH_FRAMES);
+            const size_t got = pipe_->read(g_scratch, chunk * AudioPipe::bytes_per_frame()) / AudioPipe::bytes_per_frame();
+            pcm::convert(data + done * output_frame, g_scratch, got,
+                         AudioPipe::bits_per_sample(), bits, mono, gain);
             done += got;
-            if (got < chunk) {
-                break;
-            }
-        }
-        real_frames = static_cast<uint32_t>(done);
-        self.apply_gain(out, done);
-        if (done < frames_wanted) {
-            self.fill_idle(reinterpret_cast<uint8_t*>(out + done), (frames_wanted - done) * sizeof(int16_t), 1);
+            if (got < chunk) break;
         }
     }
-
-    if (real_frames > 0 && self.callbacks_.frames_played) {
-        self.callbacks_.frames_played(real_frames, now + AudioPipe::frames_to_us(real_frames));
+    if (done < wanted) {
+        fill_idle(data + done * output_frame, len - done * output_frame, mono ? 1 : 2);
+        if (audio_active_.load(std::memory_order_relaxed)) pcm_underrun_frames_ += wanted - done;
     }
-    return len;
+    return static_cast<uint32_t>(done);
 }

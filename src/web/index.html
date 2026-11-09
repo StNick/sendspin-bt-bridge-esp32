@@ -29,6 +29,8 @@ button:disabled{opacity:.5;cursor:default}
 input[type=range]{width:100%}
 label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
 input[type=text],input[type=password],input[type=number],select{width:100%;padding:7px 9px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit}
+select{-webkit-appearance:none;appearance:none;padding-right:36px;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 17px) 50%,calc(100% - 12px) 50%;background-size:5px 5px;background-repeat:no-repeat}
+@media(forced-colors:active){select{-webkit-appearance:menulist;appearance:auto;background-image:none}}
 .check{display:flex;gap:8px;align-items:center;color:var(--fg);font-size:14px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
 ul.devices{list-style:none;padding:0;margin:8px 0 0;max-height:260px;overflow:auto}
@@ -122,8 +124,12 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:
         <div><label for="c-buf">Buffer (ms)</label><input type="number" id="c-buf" min="100" max="3000"></div>
         <div><label for="c-lead">Startup lead time (ms)</label><input type="number" id="c-lead" min="0" max="5000"></div>
         <div><label for="c-pin">Legacy Bluetooth PIN</label><input type="text" id="c-pin" maxlength="16"></div>
+        <div><label for="c-rate">Music Assistant sample rate</label><select id="c-rate"><option value="44100">44.1 kHz</option><option value="48000">48 kHz</option></select></div>
+        <div><label for="c-bits">Music Assistant bit depth</label><select id="c-bits"><option value="16">16-bit</option><option value="24">24-bit</option></select></div>
+        <div><label for="c-ldac">LDAC quality</label><select id="c-ldac"><option value="high">High — 909 / 990 kbit/s</option><option value="standard">Balanced — 606 / 660 kbit/s</option><option value="connection">Connection priority — 303 / 330 kbit/s</option></select></div>
         <div><label for="c-web">Web UI password (user "admin")</label><input type="password" id="c-web" maxlength="64" placeholder="unchanged"></div>
       </div>
+      <p class="muted">FLAC is preferred for lossless input. Rate and depth changes restart the bridge; the speaker must support the chosen rate. LDAC uses the selected depth; AAC/SBC use 16-bit. LDAC bitrates shown are for 44.1 / 48 kHz. Higher settings use more wireless bandwidth.</p>
       <div class="row"><button type="submit" class="primary">Save</button><span class="muted" id="cfg-note"></span></div>
     </form>
   </section>
@@ -199,6 +205,12 @@ function fmtBytes(n) {
   return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.round(n / 1024) + " KB";
 }
 
+// Approximate reception labels; signal strength alone does not measure link throughput.
+function wifiSignal(rssi) {
+  const rating = rssi >= -55 ? "Excellent" : rssi >= -67 ? "Good" : rssi >= -75 ? "Fair" : rssi >= -85 ? "Weak" : "Very weak";
+  return `${rating} · ${rssi} dBm`;
+}
+
 const BT_STATES = {
   no_speaker: ["No speaker", "warn"], disconnected: ["Disconnected", "bad"], connecting: ["Connecting", "warn"],
   connected: ["Connected", "ok"], streaming: ["Streaming", "ok"], disconnecting: ["Disconnecting", "warn"],
@@ -237,11 +249,22 @@ function render(s) {
 
   // Speaker
   const st = BT_STATES[bt.state] || [bt.state, "muted"];
+  const rssiDelta = bt.rssi_delta_db ?? bt.rssi_dbm;
   pill($("bt-pill"), st[0], st[1]);
   kv($("bt-kv"), [
     ["Name", bt.speaker_name || (bt.has_speaker ? "(unnamed)" : "")],
     ["Address", bt.speaker_mac],
-    ["Signal (RSSI)", bt.rssi_dbm !== undefined ? (bt.rssi_dbm === 0 ? "good (inside ideal range)" : (bt.rssi_dbm > 0 ? "+" : "") + bt.rssi_dbm + " dB vs. ideal range") : ""],
+    ["Bluetooth codec", bt.codec || ""],
+    ["Encoder input", bt.connected ? `${bt.sample_rate / 1000} kHz / ${bt.pcm_bits}-bit` : ""],
+    ["Audio buffer", bt.streaming ? `${bt.pcm_buffer_ms} ms` : ""],
+    ["PCM underruns", bt.pcm_underrun_frames ? `${(bt.pcm_underrun_frames / bt.sample_rate).toFixed(2)} s since boot` : ""],
+    ["Transmit queue / peak", bt.transport ? `${bt.transport.source_depth} / ${bt.transport.source_high_water} packets` : ""],
+    ["Transport rejections / drops", bt.transport ? `${bt.transport.source_rejected} / ${bt.transport.path_dropped + bt.transport.media_write_failures}` : ""],
+    ["Longest controller completion gap", bt.transport && bt.transport.controller_gap_us_max ? `${(bt.transport.controller_gap_us_max / 1000).toFixed(1)} ms` : ""],
+    ["Send retries / drops", bt.streaming ? `${bt.send_retries} / ${bt.dropped_packets}` : ""],
+    ["Codec bitrate", bt.connected && bt.bitrate_bps > 0 ? (bt.bitrate_bps / 1000).toLocaleString(undefined, {maximumFractionDigits: 1}) + " kbit/s" : ""],
+    ["Absolute Bluetooth RSSI", bt.connected ? bt.rssi_absolute_unavailable_reason : ""],
+    ["Bluetooth RSSI delta", rssiDelta !== undefined ? `${rssiDelta > 0 ? "+" : ""}${rssiDelta} dB${rssiDelta === 0 ? " (inside ideal range)" : " vs. ideal range"}` : ""],
     ["Volume control", bt.connected ? (bt.abs_volume ? "Speaker (AVRCP absolute volume)" : "Bridge (software)") : ""],
     ["Reported latency", bt.delay_report_ms !== undefined ? bt.delay_report_ms + " ms" : ""],
     ["Channels", bt.connected && bt.mono_sink ? "Mono speaker (down-mixed)" : ""],
@@ -265,6 +288,7 @@ function render(s) {
     ["Server", ss.server_name],
     ["Group", ss.group_name],
     ["Playback", ss.playback_state],
+    ["Received audio", ss.stream_active ? `${ss.stream_codec} · ${ss.sample_rate / 1000} kHz / ${ss.bit_depth}-bit` : ""],
     ["Session", ss.connected ? (ss.paired ? "Paired" : "Unpaired") : ""],
     ["Clock sync", ss.connected ? (ss.time_synced ? "Synced" : "Syncing…") : ""],
     ["Unpaired servers may play", ss.enabled ? (ss.unpaired_access ? "Yes" : "No") : ""],
@@ -283,7 +307,8 @@ function render(s) {
   kv($("sys-kv"), [
     ["Firmware", sys.version + " (ESP-IDF " + sys.idf + ")"],
     ["Uptime", Math.floor(sys.uptime_s / 3600) + " h " + Math.floor(sys.uptime_s % 3600 / 60) + " min"],
-    ["Wi-Fi", w.connected ? `${w.ssid} (${w.rssi} dBm)` : (w.configured ? "Not connected" : "Not configured")],
+    ["Wi-Fi", w.connected ? w.ssid : (w.configured ? "Not connected" : "Not configured")],
+    ["Wi-Fi signal", w.connected ? wifiSignal(w.rssi) : ""],
     ["Internal RAM free", fmtBytes(sys.heap_internal_free) + " (min " + fmtBytes(sys.heap_internal_min) + ")"],
     ["PSRAM free", sys.psram_total ? fmtBytes(sys.psram_free) + " of " + fmtBytes(sys.psram_total) : "none"],
     ["Hostname", w.hostname ? w.hostname + ".local" : ""],
@@ -299,6 +324,13 @@ async function poll() {
   }
   setTimeout(poll, 2000);
 }
+
+function updateBufferLimit() {
+  const max = $("c-bits").value === "24" ? 2000 : 3000;
+  $("c-buf").max = max;
+  if (+$("c-buf").value > max) $("c-buf").value = max;
+}
+$("c-bits").onchange = updateBufferLimit;
 
 async function loadConfig() {
   const c = await api("/api/config");
@@ -317,6 +349,10 @@ async function loadConfig() {
   $("c-buf").value = c.min_buffer_ms;
   $("c-lead").value = c.lead_time_ms;
   $("c-pin").value = c.bt_pin;
+  $("c-ldac").value = c.ldac_quality || "standard";
+  $("c-rate").value = c.audio_sample_rate || 44100;
+  $("c-bits").value = c.audio_bit_depth || 16;
+  updateBufferLimit();
   $("c-web").placeholder = c.web_password_set ? "unchanged" : "none";
   cfgLoaded = true;
 }
@@ -340,6 +376,9 @@ $("cfg-form").addEventListener("submit", async (ev) => {
     min_buffer_ms: num("c-buf"),
     lead_time_ms: num("c-lead"),
     bt_pin: $("c-pin").value,
+    ldac_quality: $("c-ldac").value,
+    audio_sample_rate: num("c-rate"),
+    audio_bit_depth: num("c-bits"),
   };
   if ($("c-pass").value) body.wifi_password = $("c-pass").value;
   if ($("c-web").value) body.web_password = $("c-web").value;

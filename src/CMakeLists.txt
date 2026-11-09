@@ -5,11 +5,12 @@ idf_component_register(
         "app_state.cpp"
         "audio_pipe.cpp"
         "bt_manager.cpp"
+        "bt_encoder.cpp"
         "log_buffer.cpp"
         "nvs_persistence.cpp"
         "web_server.cpp"
         "wifi_manager.cpp"
-    INCLUDE_DIRS "."
+    INCLUDE_DIRS "." "../scripts"
     EMBED_TXTFILES "web/index.html"
     REQUIRES
         app_update
@@ -27,6 +28,8 @@ idf_component_register(
         mbedtls
         nvs_flash
         espressif__mdns
+        espressif__esp_audio_codec
+        libldac
         sendspin__sendspin-cpp
         bblanchon__arduinojson
 )

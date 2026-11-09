@@ -64,6 +64,9 @@ void sanitize(AppConfig& c) {
     if (c.bt_pin.empty() || c.bt_pin.size() > 16) {
         c.bt_pin = "0000";
     }
+    if (static_cast<uint8_t>(c.ldac_quality) > static_cast<uint8_t>(LdacQuality::CONNECTION)) {
+        c.ldac_quality = LdacQuality::STANDARD;
+    }
     if (static_cast<uint8_t>(c.idle_mode) > static_cast<uint8_t>(IdleMode::KEEP_ALIVE)) {
         c.idle_mode = IdleMode::DEFAULT;
     }
@@ -76,11 +79,14 @@ void sanitize(AppConfig& c) {
     if (c.min_buffer_ms < 100) {
         c.min_buffer_ms = 100;
     }
+    if (c.audio_sample_rate != 44100 && c.audio_sample_rate != 48000) c.audio_sample_rate = 44100;
+    if (c.audio_bit_depth != 16 && c.audio_bit_depth != 24) c.audio_bit_depth = 16;
     // min_buffer_ms must fit sendspin-cpp's advertised buffer (621,312 bytes with the default
-    // 1 MB capacity) at the highest-bitrate format, 44.1 kHz/16-bit/stereo PCM (176,400 B/s):
-    // 3000 ms = 529,200 bytes.
-    if (c.min_buffer_ms > 3000) {
-        c.min_buffer_ms = 3000;
+    // 1 MB capacity). At 48 kHz stereo, 3000 ms of 16-bit or 2000 ms of 24-bit
+    // PCM requires 576,000 bytes.
+    const uint16_t max_buffer_ms = c.audio_bit_depth == 24 ? 2000 : 3000;
+    if (c.min_buffer_ms > max_buffer_ms) {
+        c.min_buffer_ms = max_buffer_ms;
     }
     if (c.lead_time_ms > 5000) {
         c.lead_time_ms = 5000;
@@ -107,6 +113,9 @@ esp_err_t write_all(const AppConfig& c) {
     check(nvs_set_blob(h, "spk_bda", c.speaker_bda.data(), c.speaker_bda.size()));
     check(nvs_set_str(h, "spk_name", c.speaker_name.c_str()));
     check(nvs_set_str(h, "bt_pin", c.bt_pin.c_str()));
+    check(nvs_set_u8(h, "ldac_quality", static_cast<uint8_t>(c.ldac_quality)));
+    check(nvs_set_u16(h, "audio_rate", static_cast<uint16_t>(c.audio_sample_rate)));
+    check(nvs_set_u8(h, "audio_bits", c.audio_bit_depth));
     check(nvs_set_u8(h, "idle_mode", static_cast<uint8_t>(c.idle_mode)));
     check(nvs_set_u16(h, "ps_delay", c.power_save_delay_min));
     check(nvs_set_u16(h, "idle_disc", c.idle_disconnect_min));
@@ -141,6 +150,22 @@ const char* idle_mode_name(IdleMode mode) {
         default:
             return "default";
     }
+}
+
+const char* ldac_quality_name(LdacQuality quality) {
+    switch (quality) {
+        case LdacQuality::STANDARD: return "standard";
+        case LdacQuality::CONNECTION: return "connection";
+        default: return "high";
+    }
+}
+
+bool ldac_quality_from_name(const std::string& name, LdacQuality* out) {
+    if (name == "high") *out = LdacQuality::HIGH;
+    else if (name == "standard") *out = LdacQuality::STANDARD;
+    else if (name == "connection") *out = LdacQuality::CONNECTION;
+    else return false;
+    return true;
 }
 
 bool idle_mode_from_name(const std::string& name, IdleMode* out) {
@@ -211,6 +236,9 @@ esp_err_t init() {
         }
         c.speaker_name = read_str(h, "spk_name", "");
         c.bt_pin = read_str(h, "bt_pin", "0000");
+        c.ldac_quality = static_cast<LdacQuality>(read_u8(h, "ldac_quality", 1));
+        c.audio_sample_rate = read_u16(h, "audio_rate", 44100);
+        c.audio_bit_depth = read_u8(h, "audio_bits", 16);
         c.idle_mode = static_cast<IdleMode>(read_u8(h, "idle_mode", 0));
         c.power_save_delay_min = read_u16(h, "ps_delay", 1);
         c.idle_disconnect_min = read_u16(h, "idle_disc", 0);

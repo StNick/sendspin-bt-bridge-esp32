@@ -34,6 +34,16 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 0.1.31
+  espressif/esp_audio_codec:
+    component_hash: a5b9275af74247e3ce536d16a7080e4d77207a185b63e1bea368eb4d57176c2b
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 2.6.2
   espressif/esp_websocket_client:
     component_hash: dc00233af846f3a744ada283a300e0d586040aadc3ee67361645ecdce4523672
     dependencies:
@@ -94,9 +104,10 @@ dependencies:
     version: 0.9.5
 direct_dependencies:
 - bblanchon/arduinojson
+- espressif/esp_audio_codec
 - espressif/mdns
 - idf
 - sendspin/sendspin-cpp
-manifest_hash: 7068eb30e5bd5f83208086afb11298b7ae0ebc27d9849247fb1b7a606c02bc75
+manifest_hash: 4edcbad5edddce8e80498240a332de754da2546792af2f29b61f8f12460f40a7
 target: esp32s31
 version: 3.0.0
