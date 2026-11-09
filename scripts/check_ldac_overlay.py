@@ -9,7 +9,8 @@ build = Path(env.subst("$BUILD_DIR")).resolve()
 if not build.is_relative_to(root / '.pio' / 'build'):
     raise RuntimeError(f"Refusing to invalidate CMake cache outside .pio/build: {build}")
 inputs = ('cmake/ldac_transport.cmake', 'scripts/prepare_ldac_transport.py',
-          'scripts/repo_ldac_transport.h', 'scripts/check_ldac_overlay.py')
+          'scripts/repo_ldac_transport.h', 'scripts/repo_bt_diag.h', 'scripts/repo_bt_diag.c',
+          'scripts/check_ldac_overlay.py')
 fingerprint = sha256(b''.join((root / name).read_bytes() for name in inputs)).hexdigest()
 stamp = build / '.ldac-overlay-sha256'
 if not stamp.exists() or stamp.read_text() != fingerprint:

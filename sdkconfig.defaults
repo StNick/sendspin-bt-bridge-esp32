@@ -44,7 +44,7 @@ CONFIG_BT_BTC_TASK_STACK_SIZE=4096
 
 # ---------------------------------------------------------------------------
 # Sendspin (sendspin-cpp component Kconfig): player + controller + metadata only.
-# Opus is off: our Bluetooth endpoints use 44.1 kHz; Opus is 48 kHz only.
+# Keep the lossless FLAC/PCM input path; no Opus decoder is needed.
 # ---------------------------------------------------------------------------
 CONFIG_SENDSPIN_ENABLE_PLAYER=y
 CONFIG_SENDSPIN_ENABLE_OPUS=n

@@ -1,7 +1,8 @@
 # Derived from esp32-s31-ldac-receiver. Patch generated copies only.
 set(_ldac_script "${CMAKE_CURRENT_LIST_DIR}/../scripts/prepare_ldac_transport.py")
 set(_ldac_header "${CMAKE_CURRENT_LIST_DIR}/../scripts/repo_ldac_transport.h")
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_ldac_script}" "${_ldac_header}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_ldac_script}" "${_ldac_header}"
+    "${CMAKE_CURRENT_LIST_DIR}/../scripts/repo_bt_diag.h" "${CMAKE_CURRENT_LIST_DIR}/../scripts/repo_bt_diag.c")
 set(_ldac_dir "${CMAKE_BINARY_DIR}/ldac_transport")
 execute_process(COMMAND "${PYTHON}" "${_ldac_script}" --framework "${IDF_PATH}" --output "${_ldac_dir}"
                 RESULT_VARIABLE _ldac_result OUTPUT_VARIABLE _ldac_out ERROR_VARIABLE _ldac_err)
@@ -20,15 +21,18 @@ set(_ldac_patched "")
 set(_ldac_count 0)
 foreach(_source IN LISTS _ldac_sources)
     get_filename_component(_name "${_source}" NAME)
-    if(_name STREQUAL "btc_av.c" OR _name STREQUAL "bta_av_co.c" OR _name STREQUAL "bta_av_aact.c")
+    if(_name STREQUAL "btc_av.c" OR _name STREQUAL "bta_av_co.c" OR
+       _name STREQUAL "bta_av_aact.c" OR _name STREQUAL "btc_a2dp_source_ext_codec.c" OR
+       _name STREQUAL "l2c_link.c")
         list(APPEND _ldac_patched "${_ldac_dir}/${_name}")
         math(EXPR _ldac_count "${_ldac_count} + 1")
     else()
         list(APPEND _ldac_patched "${_source}")
     endif()
 endforeach()
-if(NOT _ldac_count EQUAL 3)
-    message(FATAL_ERROR "LDAC source overlay requires three SDK sources; found ${_ldac_count}")
+if(NOT _ldac_count EQUAL 5)
+    message(FATAL_ERROR "LDAC source overlay requires five SDK sources; found ${_ldac_count}")
 endif()
+list(APPEND _ldac_patched "${_ldac_dir}/repo_bt_diag.c")
 set_property(TARGET ${_ldac_bt_lib} PROPERTY SOURCES "${_ldac_patched}")
 message(STATUS "LDAC: project-local Bluedroid source transport enabled")

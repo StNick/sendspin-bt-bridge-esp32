@@ -28,7 +28,8 @@ esp_err_t BtEncoder::register_endpoints() {
     // Lowest endpoint index wins when we initiate negotiation.
     esp_a2d_mcc_t ldac{};
     ldac.type = ESP_A2D_MCT_NON_A2DP;
-    const uint8_t ldac_cie[8] = {0x2d, 0x01, 0, 0, 0xaa, 0, REPO_LDAC_RATE_44100, REPO_LDAC_STEREO};
+    const uint8_t rate = AudioPipe::sample_rate() == 48000 ? REPO_LDAC_RATE_48000 : REPO_LDAC_RATE_44100;
+    const uint8_t ldac_cie[8] = {0x2d, 0x01, 0, 0, 0xaa, 0, rate, REPO_LDAC_STEREO};
     memcpy(ldac.cie.vendor_info, ldac_cie, sizeof(ldac_cie));
     esp_err_t err = esp_a2d_source_register_stream_endpoint(0, &ldac);
     if (err != ESP_OK) return err;
@@ -36,7 +37,8 @@ esp_err_t BtEncoder::register_endpoints() {
     aac.type = ESP_A2D_MCT_M24;
     auto& a = aac.cie.m24_info;
     a.obj_type = ESP_A2D_M24_CIE_OBJ_TYPE_2_AAC_LC | ESP_A2D_M24_CIE_OBJ_TYPE_4_AAC_LC;
-    a.samp_freq1 = ESP_A2D_M24_CIE_SF1_44K;
+    a.samp_freq1 = AudioPipe::sample_rate() == 44100 ? ESP_A2D_M24_CIE_SF1_44K : 0;
+    a.samp_freq2 = AudioPipe::sample_rate() == 48000 ? ESP_A2D_M24_CIE_SF2_48K : 0;
     a.ch = ESP_A2D_M24_CIE_CH_1 | ESP_A2D_M24_CIE_CH_2;
     // CBR raw AAC; Bluedroid wraps it in LATM. Do not advertise unsupported rates.
     a.br1 = (AAC_BITRATE >> 16) & ESP_A2D_M24_CIE_BR1_MSK;
@@ -48,7 +50,7 @@ esp_err_t BtEncoder::register_endpoints() {
     esp_a2d_mcc_t sbc{};
     sbc.type = ESP_A2D_MCT_SBC;
     auto& s = sbc.cie.sbc_info;
-    s.samp_freq = ESP_A2D_SBC_CIE_SF_44K;
+    s.samp_freq = AudioPipe::sample_rate() == 48000 ? ESP_A2D_SBC_CIE_SF_48K : ESP_A2D_SBC_CIE_SF_44K;
     s.ch_mode = ESP_A2D_SBC_CIE_CH_MODE_MONO | ESP_A2D_SBC_CIE_CH_MODE_DUAL_CHANNEL |
                 ESP_A2D_SBC_CIE_CH_MODE_STEREO | ESP_A2D_SBC_CIE_CH_MODE_JOINT_STEREO;
     s.block_len = ESP_A2D_SBC_CIE_BLOCK_LEN_16;
@@ -64,16 +66,21 @@ bool BtEncoder::configure(const esp_a2d_mcc_t& codec) {
     esp_audio_err_t err = ESP_AUDIO_ERR_FAIL;
     aac_ = codec.type == ESP_A2D_MCT_M24;
     ldac_ = codec.type == ESP_A2D_MCT_NON_A2DP;
+    pcm_bits_ = ldac_ ? AudioPipe::bits_per_sample() : 16;
     if (ldac_) {
-        if (!repo_ldac_cie_valid(codec.cie.vendor_info, true)) return false;
+        const uint8_t expected_rate = AudioPipe::sample_rate() == 48000 ? REPO_LDAC_RATE_48000 : REPO_LDAC_RATE_44100;
+        if (!repo_ldac_cie_valid(codec.cie.vendor_info, true) || codec.cie.vendor_info[6] != expected_rate) return false;
         channels_ = 2;
         encoder_ = ldacBT_get_handle();
-        input_size_ = LDACBT_ENC_LSU * AudioPipe::BYTES_PER_FRAME;
+        input_size_ = LDACBT_ENC_LSU * AudioPipe::bytes_per_frame();
         output_size_ = LDACBT_MAX_NBYTES;
         err = encoder_ ? ESP_AUDIO_ERR_OK : ESP_AUDIO_ERR_FAIL;
     } else if (aac_) {
         const auto& a = codec.cie.m24_info;
-        if (a.samp_freq1 != ESP_A2D_M24_CIE_SF1_44K || a.samp_freq2 != 0 ||
+        const bool rate_matches = AudioPipe::sample_rate() == 44100 ?
+            a.samp_freq1 == ESP_A2D_M24_CIE_SF1_44K && a.samp_freq2 == 0 :
+            a.samp_freq1 == 0 && a.samp_freq2 == ESP_A2D_M24_CIE_SF2_48K;
+        if (!rate_matches ||
             (a.ch != ESP_A2D_M24_CIE_CH_1 && a.ch != ESP_A2D_M24_CIE_CH_2) ||
             (a.obj_type != ESP_A2D_M24_CIE_OBJ_TYPE_2_AAC_LC &&
              a.obj_type != ESP_A2D_M24_CIE_OBJ_TYPE_4_AAC_LC)) return false;
@@ -81,7 +88,7 @@ bool BtEncoder::configure(const esp_a2d_mcc_t& codec) {
         const uint32_t bitrate = (static_cast<uint32_t>(a.br1 & ESP_A2D_M24_CIE_BR1_MSK) << 16) |
                                  (static_cast<uint32_t>(a.br2) << 8) | a.br3;
         esp_aac_enc_config_t cfg{};
-        cfg.sample_rate = AudioPipe::SAMPLE_RATE;
+        cfg.sample_rate = AudioPipe::sample_rate();
         cfg.channel = channels_;
         cfg.bits_per_sample = 16;
         cfg.bitrate = bitrate ? std::min(bitrate, AAC_BITRATE) : AAC_BITRATE;
@@ -90,7 +97,8 @@ bool BtEncoder::configure(const esp_a2d_mcc_t& codec) {
         if (err == ESP_AUDIO_ERR_OK) err = esp_aac_enc_get_frame_size(encoder_, &input_size_, &output_size_);
     } else if (codec.type == ESP_A2D_MCT_SBC) {
         const auto& s = codec.cie.sbc_info;
-        if (s.samp_freq != ESP_A2D_SBC_CIE_SF_44K || s.block_len != ESP_A2D_SBC_CIE_BLOCK_LEN_16 ||
+        const auto expected_rate = AudioPipe::sample_rate() == 48000 ? ESP_A2D_SBC_CIE_SF_48K : ESP_A2D_SBC_CIE_SF_44K;
+        if (s.samp_freq != expected_rate || s.block_len != ESP_A2D_SBC_CIE_BLOCK_LEN_16 ||
             s.num_subbands != ESP_A2D_SBC_CIE_NUM_SUBBANDS_8 ||
             s.alloc_mthd != ESP_A2D_SBC_CIE_ALLOC_MTHD_LOUDNESS ||
             s.min_bitpool < 2 || s.max_bitpool < s.min_bitpool || s.max_bitpool > 53) return false;
@@ -103,7 +111,7 @@ bool BtEncoder::configure(const esp_a2d_mcc_t& codec) {
             default: return false;
         }
         channels_ = cfg.ch_mode == ESP_SBC_CH_MODE_MONO ? 1 : 2;
-        cfg.sample_rate = AudioPipe::SAMPLE_RATE;
+        cfg.sample_rate = AudioPipe::sample_rate();
         cfg.allocation_method = ESP_SBC_ALLOC_LOUDNESS;
         cfg.bitpool = s.max_bitpool;
         cfg.block_length = 16;
@@ -128,7 +136,8 @@ bool BtEncoder::configure(const esp_a2d_mcc_t& codec) {
         close();
         return false;
     }
-    ESP_LOGI(TAG, "Negotiated %s, 44100 Hz, %d channel(s)", codec_name(), channels_);
+    ESP_LOGI(TAG, "Negotiated %s, %lu Hz, %u-bit, %d channel(s)", codec_name(),
+             static_cast<unsigned long>(AudioPipe::sample_rate()), pcm_bits_, channels_);
     return true;
 }
 
@@ -170,12 +179,14 @@ bool BtEncoder::start(esp_a2d_conn_hdl_t connection, uint16_t mtu, ReadPcm read,
         const int mode = ldac_quality_ == LdacQuality::STANDARD ? LDACBT_EQMID_SQ :
                          ldac_quality_ == LdacQuality::CONNECTION ? LDACBT_EQMID_MQ : LDACBT_EQMID_HQ;
         if (mtu < 661 || ldacBT_init_handle_encode(handle, 679, mode,
-                LDACBT_CHANNEL_MODE_STEREO, LDACBT_SMPL_FMT_S16, AudioPipe::SAMPLE_RATE) != 0) {
+                LDACBT_CHANNEL_MODE_STEREO, pcm_bits_ == 24 ? LDACBT_SMPL_FMT_S24 : LDACBT_SMPL_FMT_S16,
+                AudioPipe::sample_rate()) != 0) {
             ESP_LOGE(TAG, "Cannot initialize LDAC for MTU %u (error 0x%x)", mtu, ldacBT_get_error_code(handle));
             return false;
         }
         bitrate_bps_ = ldacBT_get_bitrate(handle) * 1000U;
-        ESP_LOGI(TAG, "LDAC: %d kbit/s, 44100 Hz stereo, MTU %u", ldacBT_get_bitrate(handle), mtu);
+        ESP_LOGI(TAG, "LDAC: %d kbit/s, %lu Hz, %u-bit stereo, MTU %u", ldacBT_get_bitrate(handle),
+                 static_cast<unsigned long>(AudioPipe::sample_rate()), pcm_bits_, mtu);
     } else {
         const auto err = aac_ ? esp_aac_enc_reset(encoder_) : esp_sbc_enc_reset(encoder_);
         if (err != ESP_AUDIO_ERR_OK) return false;
@@ -232,15 +243,12 @@ void BtEncoder::task_entry(void* arg) {
 }
 
 void BtEncoder::stream() {
-    const uint32_t samples = input_size_ * packet_frames_ / (channels_ * sizeof(int16_t));
+    const uint32_t samples = input_size_ * packet_frames_ / (channels_ * (pcm_bits_ / 8));
     const int64_t frame_us = AudioPipe::frames_to_us(samples);
     int64_t deadline = esp_timer_get_time();
     uint64_t frame_index = 0;
     const int64_t epoch = deadline;
-    // LDAC buffers several 128-sample inputs before producing a packet. Keep
-    // real/filler accounting until those exact frames are handed to A2DP.
-    uint32_t pending_real[32]{};
-    unsigned pending_head = 0, pending_count = 0;
+    unsigned pending_count = 0;
     uint64_t encode_total_us = 0;
     uint32_t encode_batches = 0;
     while (running_.load()) {
@@ -252,10 +260,15 @@ void BtEncoder::stream() {
         // Use cumulative samples to avoid rounding drift, and never burst after a stall.
         if (now - deadline > frame_us) {
             ++late_batches_;
-            frame_index = static_cast<uint64_t>(now - epoch) * AudioPipe::SAMPLE_RATE / (samples * 1000000ULL);
+            frame_index = static_cast<uint64_t>(now - epoch) * AudioPipe::sample_rate() / (samples * 1000000ULL);
         }
-        deadline = epoch + static_cast<int64_t>((++frame_index * samples * 1000000ULL) / AudioPipe::SAMPLE_RATE);
+        deadline = epoch + static_cast<int64_t>((++frame_index * samples * 1000000ULL) / AudioPipe::sample_rate());
         uint32_t real_frames = read_(pcm_, input_size_ * packet_frames_);
+        // Notify at the PCM handoff using its sample-clock deadline. Waiting for
+        // a later encoded packet made clock feedback sensitive to batching and
+        // lost packets, even though that PCM had already left the pipe.
+        if (real_frames && played_) played_(real_frames,
+            deadline - AudioPipe::frames_to_us(samples - real_frames));
         const int64_t encode_start = esp_timer_get_time();
         esp_audio_enc_in_frame_t in{};
         in.buffer = pcm_;
@@ -266,17 +279,13 @@ void BtEncoder::stream() {
         unsigned frames_in_packet = packet_frames_;
         int err;
         if (ldac_) {
-            uint32_t unread_real = real_frames;
-            real_frames = 0;
             frames_in_packet = 0;
             err = ESP_AUDIO_ERR_OK;
             // Process a whole transport packet per wake-up, not one 2.9 ms
             // codec frame. Sony still receives its required 128-sample inputs.
             for (unsigned chunk = 0; chunk < packet_frames_; ++chunk) {
                 if (pending_count == 32) { err = ESP_AUDIO_ERR_FAIL; break; }
-                const uint32_t chunk_real = std::min<uint32_t>(unread_real, LDACBT_ENC_LSU);
-                unread_real -= chunk_real;
-                pending_real[(pending_head + pending_count++) % 32] = chunk_real;
+                ++pending_count;
                 int used = 0, bytes = 0, frames = 0;
                 err = ldacBT_encode(static_cast<HANDLE_LDAC_BT>(encoder_), pcm_ + chunk * input_size_,
                                     &used, encoded_, &bytes, &frames);
@@ -289,11 +298,7 @@ void BtEncoder::stream() {
                 if (bytes) {
                     out.encoded_bytes = bytes;
                     frames_in_packet = frames;
-                    for (int i = 0; i < frames; ++i) {
-                        real_frames += pending_real[pending_head];
-                        pending_head = (pending_head + 1) % 32;
-                        --pending_count;
-                    }
+                    pending_count -= frames;
                 }
             }
         } else {
@@ -334,7 +339,6 @@ void BtEncoder::stream() {
         // submitted. Congestion drops during playback still consume clock time.
         if (sent == ESP_OK || running_.load()) timestamp_ += packet_samples;
         if (sent != ESP_OK) ++dropped_packets_;
-        if (sent == ESP_OK && real_frames && played_) played_(real_frames, now + AudioPipe::frames_to_us(packet_samples));
         if (sent != ESP_OK && sent != ESP_FAIL) break;
     }
     running_.store(false);

@@ -8,6 +8,8 @@
 #include <string>
 
 #include "app_state.h"
+#include "pcm_format.h"
+#include "repo_bt_diag.h"
 #include "bt_manager.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
@@ -216,7 +218,11 @@ esp_err_t handle_status(httpd_req_t* req) {
     bt["scanning"] = b.scanning;
     bt["abs_volume"] = b.abs_volume;
     if (b.rssi_valid) {
-        bt["rssi_dbm"] = b.rssi_dbm;
+        bt["rssi_dbm"] = b.rssi_delta_db;
+        bt["rssi_delta_db"] = b.rssi_delta_db;
+    }
+    if (b.connected) {
+        bt["rssi_absolute_unavailable_reason"] = "Unavailable in ESP32-S31 controller SDK";
     }
     if (b.delay_report_ms >= 0) {
         bt["delay_report_ms"] = b.delay_report_ms;
@@ -229,6 +235,31 @@ esp_err_t handle_status(httpd_req_t* req) {
     bt["encoder_late_batches"] = b.encoder_metrics.late_batches;
     bt["send_retries"] = b.encoder_metrics.send_retries;
     bt["dropped_packets"] = b.encoder_metrics.dropped_packets;
+    bt["sample_rate"] = b.sample_rate;
+    bt["pcm_bits"] = b.pcm_bits;
+    bt["pcm_buffer_ms"] = b.pcm_buffer_ms;
+    bt["pcm_underrun_frames"] = b.pcm_underrun_frames;
+    repo_bt_diag_t transport{};
+    repo_bt_diag_get(&transport);
+    JsonObject td = bt["transport"].to<JsonObject>();
+    td["source_enqueued"] = transport.source_enqueued;
+    td["source_dequeued"] = transport.source_dequeued;
+    td["source_rejected"] = transport.source_rejected;
+    td["source_flushed"] = transport.source_flushed;
+    td["source_depth"] = transport.source_depth;
+    td["source_high_water"] = transport.source_high_water;
+    td["source_gap_us_max"] = transport.source_gap_us_max;
+    td["media_writes"] = transport.media_writes;
+    td["media_bytes"] = transport.media_bytes;
+    td["media_write_failures"] = transport.media_write_failures;
+    td["l2cap_depth"] = transport.l2cap_depth;
+    td["l2cap_high_water"] = transport.l2cap_high_water;
+    td["path_congested"] = transport.path_congested;
+    td["path_dropped"] = transport.path_dropped;
+    td["guard_deferrals"] = transport.guard_deferrals;
+    td["controller_completed"] = transport.controller_completed;
+    td["controller_gap_us_max"] = transport.controller_gap_us_max;
+    td["controller_outstanding_max"] = transport.controller_outstanding_max;
     bt["last_event"] = b.last_event;
     JsonArray results = bt["scan_results"].to<JsonArray>();
     for (const auto& r : b.scan_results) {
@@ -258,6 +289,8 @@ esp_err_t handle_status(httpd_req_t* req) {
     ss["playback_state"] = s.playback_state;
     ss["stream_active"] = s.stream_active;
     ss["stream_codec"] = s.stream_codec;
+    ss["sample_rate"] = s.sample_rate;
+    ss["bit_depth"] = s.bit_depth;
     ss["volume"] = s.volume;
     ss["muted"] = s.muted;
     ss["output_delay_ms"] = s.output_delay_ms;
@@ -300,6 +333,8 @@ esp_err_t handle_get_config(httpd_req_t* req) {
     doc["bt_max_reconnect_fails"] = c.bt_max_reconnect_fails;
     doc["bt_pin"] = c.bt_pin;
     doc["ldac_quality"] = ldac_quality_name(c.ldac_quality);
+    doc["audio_sample_rate"] = c.audio_sample_rate;
+    doc["audio_bit_depth"] = c.audio_bit_depth;
     doc["min_buffer_ms"] = c.min_buffer_ms;
     doc["lead_time_ms"] = c.lead_time_ms;
     doc["web_password_set"] = !c.web_password.empty();
@@ -383,7 +418,9 @@ esp_err_t handle_post_config(httpd_req_t* req) {
             return send_error(req, "400 Bad Request", "unknown keepalive_method");
         }
     }
-    if (!read_uint<uint16_t>(in, "power_save_delay_min", 0, 1440, &c.power_save_delay_min, &error) ||
+    if (!read_uint<uint32_t>(in, "audio_sample_rate", 44100, 48000, &c.audio_sample_rate, &error) ||
+        !read_uint<uint8_t>(in, "audio_bit_depth", 16, 24, &c.audio_bit_depth, &error) ||
+        !read_uint<uint16_t>(in, "power_save_delay_min", 0, 1440, &c.power_save_delay_min, &error) ||
         !read_uint<uint16_t>(in, "idle_disconnect_min", 0, 1440, &c.idle_disconnect_min, &error) ||
         !read_uint<uint16_t>(in, "keepalive_interval_s", 30, 3600, &c.keepalive_interval_s, &error) ||
         !read_uint<uint16_t>(in, "bt_check_interval_s", 5, 600, &c.bt_check_interval_s, &error) ||
@@ -391,6 +428,12 @@ esp_err_t handle_post_config(httpd_req_t* req) {
         !read_uint<uint16_t>(in, "min_buffer_ms", 100, 3000, &c.min_buffer_ms, &error) ||
         !read_uint<uint16_t>(in, "lead_time_ms", 0, 5000, &c.lead_time_ms, &error)) {
         return send_error(req, "400 Bad Request", error.c_str());
+    }
+    if (!pcm::valid_format(c.audio_sample_rate, c.audio_bit_depth)) {
+        return send_error(req, "400 Bad Request", "audio format must be 44100/48000 Hz and 16/24 bit");
+    }
+    if (c.audio_bit_depth == 24 && c.min_buffer_ms > 2000) {
+        return send_error(req, "400 Bad Request", "24-bit audio supports a maximum 2000 ms buffer");
     }
     if (in["bt_pin"].is<const char*>()) {
         std::string pin = in["bt_pin"].as<std::string>();
@@ -426,6 +469,8 @@ esp_err_t handle_post_config(httpd_req_t* req) {
         cur.lead_time_ms = c.lead_time_ms;
         cur.bt_pin = c.bt_pin;
         cur.ldac_quality = c.ldac_quality;
+        cur.audio_sample_rate = c.audio_sample_rate;
+        cur.audio_bit_depth = c.audio_bit_depth;
         cur.web_password = c.web_password;
     });
     if (save_err != ESP_OK) {
@@ -435,6 +480,8 @@ esp_err_t handle_post_config(httpd_req_t* req) {
     const bool reboot_required = before.name != after.name || before.wifi_ssid != after.wifi_ssid ||
                                  before.wifi_password != after.wifi_password ||
                                  before.server_url != after.server_url ||
+                                 before.audio_sample_rate != after.audio_sample_rate ||
+                                 before.audio_bit_depth != after.audio_bit_depth ||
                                  before.min_buffer_ms != after.min_buffer_ms ||
                                  before.lead_time_ms != after.lead_time_ms;
     if (g_actions.settings_changed) {
@@ -444,6 +491,14 @@ esp_err_t handle_post_config(httpd_req_t* req) {
     out["ok"] = true;
     out["reboot_required"] = reboot_required;
     return send_json(req, out);
+}
+
+esp_err_t handle_reset_transport_diagnostics(httpd_req_t* req) {
+    if (!authorized(req)) return ESP_OK;
+    repo_bt_diag_reset();
+    JsonDocument doc;
+    doc["ok"] = true;
+    return send_json(req, doc);
 }
 
 esp_err_t handle_logs(httpd_req_t* req) {
@@ -743,6 +798,7 @@ esp_err_t start(WebActions actions) {
     register_uri("/api/bt/reconnect", HTTP_POST, handle_bt_reconnect);
     register_uri("/api/bt/standby", HTTP_POST, handle_bt_standby);
     register_uri("/api/transport", HTTP_POST, handle_transport);
+    register_uri("/api/diagnostics/transport/reset", HTTP_POST, handle_reset_transport_diagnostics);
     register_uri("/api/volume", HTTP_POST, handle_volume);
     register_uri("/api/delay", HTTP_POST, handle_delay);
     register_uri("/api/pairing/confirm", HTTP_POST, handle_pairing_confirm);

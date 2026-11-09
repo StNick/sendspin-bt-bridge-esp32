@@ -49,6 +49,8 @@ struct AppConfig {
     std::string speaker_name;
     std::string bt_pin{"0000"};  // legacy (pre-2.1) PIN pairing only
     LdacQuality ldac_quality{LdacQuality::STANDARD};
+    uint32_t audio_sample_rate{44100};
+    uint8_t audio_bit_depth{16};
 
     // Idle behaviour
     IdleMode idle_mode{IdleMode::DEFAULT};

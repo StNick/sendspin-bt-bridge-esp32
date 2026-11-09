@@ -12,6 +12,8 @@
 #define REPO_LDAC_CODEC_ID 0xff
 #define REPO_LDAC_INFO_LEN 11
 #define REPO_LDAC_RATE_44100 0x20
+#define REPO_LDAC_RATE_48000 0x10
+#define REPO_LDAC_RATES (REPO_LDAC_RATE_44100 | REPO_LDAC_RATE_48000)
 #define REPO_LDAC_STEREO 0x01
 
 #if defined(ESP_PLATFORM) && (!defined(AVDT_CODEC_SIZE) || AVDT_CODEC_SIZE < REPO_LDAC_INFO_LEN)
@@ -28,8 +30,8 @@ static inline bool repo_ldac_cie_valid(const uint8_t *cie, bool configuration)
 {
     if (!repo_ldac_cie_known(cie)) return false;
     if (configuration)
-        return cie[6] == REPO_LDAC_RATE_44100 && cie[7] == REPO_LDAC_STEREO;
-    return (cie[6] & REPO_LDAC_RATE_44100) && (cie[7] & REPO_LDAC_STEREO);
+        return (cie[6] == REPO_LDAC_RATE_44100 || cie[6] == REPO_LDAC_RATE_48000) && cie[7] == REPO_LDAC_STEREO;
+    return (cie[6] & REPO_LDAC_RATES) && (cie[7] & REPO_LDAC_STEREO);
 }
 
 static inline bool repo_ldac_info_known(const uint8_t *info)
@@ -46,14 +48,15 @@ static inline bool repo_ldac_info_valid(const uint8_t *info, bool configuration)
 
 static inline bool repo_ldac_config_in_caps(const uint8_t *config, const uint8_t *caps)
 {
-    return repo_ldac_info_valid(config, true) && repo_ldac_info_valid(caps, false);
+    return repo_ldac_info_valid(config, true) && repo_ldac_info_valid(caps, false) &&
+           (config[9] & caps[9]);
 }
 
 static inline bool repo_ldac_preferred_config(uint8_t *output, const uint8_t *caps)
 {
     if (!repo_ldac_info_valid(caps, false)) return false;
     memcpy(output, caps, REPO_LDAC_INFO_LEN);
-    output[9] = REPO_LDAC_RATE_44100;
+    output[9] = caps[9] & REPO_LDAC_RATE_44100 ? REPO_LDAC_RATE_44100 : REPO_LDAC_RATE_48000;
     output[10] = REPO_LDAC_STEREO;
     return true;
 }
@@ -66,7 +69,7 @@ static inline bool repo_ldac_payload_valid(const uint8_t *payload, size_t size)
     unsigned count = 0;
     while (offset < size) {
         if (size - offset < 3 || payload[offset] != 0xaa ||
-            (payload[offset + 1] >> 5) != 0 ||
+            (payload[offset + 1] >> 5) > 1 ||
             ((payload[offset + 1] >> 3) & 3) != 2) return false;
         size_t frame_size = (((size_t)(payload[offset + 1] & 7) << 6) |
                              (payload[offset + 2] >> 2)) + 4;

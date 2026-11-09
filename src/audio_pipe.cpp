@@ -19,7 +19,7 @@ TickType_t ms_to_ticks(uint32_t ms) {
 }  // namespace
 
 bool AudioPipe::init(size_t capacity_bytes) {
-    capacity_ = capacity_bytes - (capacity_bytes % BYTES_PER_FRAME);
+    capacity_ = capacity_bytes - (capacity_bytes % bytes_per_frame());
     if (capacity_ == 0) {
         return false;
     }
@@ -40,7 +40,7 @@ size_t AudioPipe::write(const uint8_t* data, size_t len, uint32_t timeout_ms) {
     if (buffer_ == nullptr) {
         return 0;
     }
-    len -= len % BYTES_PER_FRAME;
+    len -= len % bytes_per_frame();
     const TickType_t start = xTaskGetTickCount();
     const TickType_t timeout = ms_to_ticks(timeout_ms);
     size_t written = 0;
@@ -49,7 +49,7 @@ size_t AudioPipe::write(const uint8_t* data, size_t len, uint32_t timeout_ms) {
         xSemaphoreTake(mutex_, portMAX_DELAY);
         size_t space = capacity_ - fill_;
         size_t chunk = std::min(space, len - written);
-        chunk -= chunk % BYTES_PER_FRAME;
+        chunk -= chunk % bytes_per_frame();
         if (chunk > 0) {
             size_t first = std::min(chunk, capacity_ - write_pos_);
             memcpy(buffer_ + write_pos_, data + written, first);
@@ -86,7 +86,7 @@ size_t AudioPipe::read(uint8_t* dst, size_t len) {
     }
     xSemaphoreTake(mutex_, portMAX_DELAY);
     size_t n = std::min(len, fill_);
-    n -= n % BYTES_PER_FRAME;
+    n -= n % bytes_per_frame();
     if (n > 0) {
         size_t first = std::min(n, capacity_ - read_pos_);
         memcpy(dst, buffer_ + read_pos_, first);

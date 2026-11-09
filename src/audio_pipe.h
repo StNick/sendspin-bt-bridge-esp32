@@ -1,9 +1,8 @@
 // PCM hand-off between the Sendspin sync task (producer, on_audio_write) and the Bluetooth
-// AAC/SBC encoder worker (consumer).
+// LDAC/AAC/SBC encoder worker (consumer).
 //
-// Format is fixed at 44.1 kHz / 16-bit / stereo: our AAC and SBC endpoints advertise only
-// 44.1 kHz, and the bridge advertises only that PCM format to Sendspin,
-// so the server resamples and no resampler is needed on the device.
+// Format is selected once at boot: 44.1/48 kHz, packed 16/24-bit stereo.
+// Sendspin and Bluetooth advertise the same rate; AAC/SBC convert depth to 16-bit.
 #pragma once
 
 #include <atomic>
@@ -12,13 +11,20 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "pcm_format.h"
 
 class AudioPipe {
 public:
-    static constexpr uint32_t SAMPLE_RATE = 44100;
     static constexpr uint8_t CHANNELS = 2;
-    static constexpr uint8_t BITS_PER_SAMPLE = 16;
-    static constexpr size_t BYTES_PER_FRAME = CHANNELS * (BITS_PER_SAMPLE / 8);
+    static bool configure_format(uint32_t rate, uint8_t bits) {
+        if (!pcm::valid_format(rate, bits)) return false;
+        sample_rate_ = rate;
+        bits_ = bits;
+        return true;
+    }
+    static uint32_t sample_rate() { return sample_rate_; }
+    static uint8_t bits_per_sample() { return bits_; }
+    static size_t bytes_per_frame() { return CHANNELS * (bits_ / 8); }
 
     /// Allocates the ring (PSRAM first). capacity is rounded down to whole frames.
     bool init(size_t capacity_bytes);
@@ -40,10 +46,13 @@ public:
 
     /// Frames per second duration helper.
     static int64_t frames_to_us(uint32_t frames) {
-        return static_cast<int64_t>(frames) * 1000000LL / SAMPLE_RATE;
+        return static_cast<int64_t>(frames) * 1000000LL / sample_rate_;
     }
 
 private:
+    // Immutable after app_main configures the pipeline, before tasks start.
+    inline static uint32_t sample_rate_{44100};
+    inline static uint8_t bits_{16};
     uint8_t* buffer_{nullptr};
     size_t capacity_{0};
     size_t read_pos_{0};

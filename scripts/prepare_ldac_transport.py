@@ -7,12 +7,13 @@ import argparse
 from pathlib import Path
 import re
 
-SOURCES = ("btc_av.c", "bta_av_co.c", "bta_av_aact.c")
+SOURCES = ("btc_av.c", "bta_av_co.c", "bta_av_aact.c", "btc_a2dp_source_ext_codec.c", "l2c_link.c")
 SOURCE_DIR = "components/bt/host/bluedroid/btc/profile/std/a2dp"
 
 
 def source_path(framework, name):
-    directory = SOURCE_DIR if name != "bta_av_aact.c" else "components/bt/host/bluedroid/bta/av"
+    directory = {"bta_av_aact.c": "components/bt/host/bluedroid/bta/av",
+                 "l2c_link.c": "components/bt/host/bluedroid/stack/l2cap"}.get(name, SOURCE_DIR)
     return Path(framework) / directory / name
 
 
@@ -161,22 +162,68 @@ def patch_bta_av_co(text):
 
 
 def patch_aact(text):
-    return edit_function(text, 'bta_av_data_path', lambda body: replace_once(body,
+    text = edit_function(text, 'bta_av_data_path', lambda body: replace_once(body,
         'UINT8   m_pt = 0x60 | p_scb->codec_type;',
         'UINT8   m_pt = p_scb->codec_type == REPO_LDAC_CODEC_ID ? 0x60 : (0x60 | p_scb->codec_type);'))
+    text = edit_function(text, 'bta_av_data_path', lambda body: replace_once(body,
+        '    if (p_scb->cong) {\n        return;',
+        '    if (p_scb->cong) {\n        repo_bt_diag_path(p_scb->l2c_bufs, 1, 0);\n        return;'))
+    text = replace_once(text,
+        'p_scb->l2c_bufs = (UINT8)L2CA_FlushChannel (p_scb->l2c_cid, L2CAP_FLUSH_CHANS_GET);',
+        'p_scb->l2c_bufs = (UINT8)L2CA_FlushChannel (p_scb->l2c_cid, L2CAP_FLUSH_CHANS_GET);\n    repo_bt_diag_path(p_scb->l2c_bufs, 0, 0);')
+    text = replace_once(text,
+        '            AVDT_WriteReqOpt(p_scb->avdt_handle, p_buf, timestamp, m_pt, opt);',
+        '            UINT16 diag_len = p_buf->len;\n'
+        '            UINT16 diag_result = AVDT_WriteReqOpt(p_scb->avdt_handle, p_buf, timestamp, m_pt, opt);\n'
+        '            repo_bt_diag_write(diag_len, diag_result == AVDT_SUCCESS);')
+    return replace_once(text, '                    bta_av_co_audio_drop(p_scb->hndl);',
+        '                    repo_bt_diag_path(p_scb->l2c_bufs, 0, 1);\n                    bta_av_co_audio_drop(p_scb->hndl);')
 
 
-PATCHERS = dict(zip(SOURCES, (patch_btc_av, patch_bta_av_co, patch_aact)))
+def patch_ext_codec(text):
+    def annotate_rejections(body):
+        if body.count('        return FALSE;') != 3:
+            raise ValueError("External codec enqueue rejection paths changed")
+        return body.replace('        return FALSE;',
+            '        repo_bt_diag_enqueue(a2dp_source_local_param.audio_tx_q ? fixed_queue_length(a2dp_source_local_param.audio_tx_q) : 0, 0);\n        return FALSE;')
+    text = edit_function(text, 'btc_a2dp_source_enqueue_audio_frame', annotate_rejections)
+    text = replace_once(text,
+        '        APPL_TRACE_WARNING("%s audio tx queue overflow: %d", __func__, fixed_queue_length(a2dp_source_local_param.audio_tx_q));',
+        '        /* Rejections are counted below and summarized outside the audio path. */')
+    text = replace_once(text,
+        '    fixed_queue_enqueue(a2dp_source_local_param.audio_tx_q, p_buf, FIXED_QUEUE_MAX_TIMEOUT);',
+        '    fixed_queue_enqueue(a2dp_source_local_param.audio_tx_q, p_buf, FIXED_QUEUE_MAX_TIMEOUT);\n'
+        '    repo_bt_diag_enqueue(fixed_queue_length(a2dp_source_local_param.audio_tx_q), 1);')
+    text = replace_once(text, '    return fixed_queue_dequeue(a2dp_source_local_param.audio_tx_q, 0);',
+        '    BT_HDR *buf = fixed_queue_dequeue(a2dp_source_local_param.audio_tx_q, 0);\n'
+        '    repo_bt_diag_read(fixed_queue_length(a2dp_source_local_param.audio_tx_q), buf != NULL);\n    return buf;')
+    return replace_once(text, '        osi_free(fixed_queue_dequeue(a2dp_source_local_param.audio_tx_q, 0));',
+        '        osi_free(fixed_queue_dequeue(a2dp_source_local_param.audio_tx_q, 0));\n        repo_bt_diag_flush();')
+
+
+def patch_l2c_link(text):
+    # Normal recursion prevention, not a failed send. Keep the return and replace
+    # synchronous per-packet UART error output with a cheap diagnostic counter.
+    text = replace_once(text, '        L2CAP_TRACE_ERROR("l2cab is_cong_cback_context");',
+        '        repo_bt_diag_guard();')
+    return edit_function(text, 'l2c_link_process_num_completed_pkts', lambda body: replace_once(body,
+        '        p_lcb = l2cu_find_lcb_by_handle (handle);',
+        '        p_lcb = l2cu_find_lcb_by_handle (handle);\n'
+        '        if (p_lcb) repo_bt_diag_completed(num_sent, p_lcb->sent_not_acked);'))
+
+
+PATCHERS = dict(zip(SOURCES, (patch_btc_av, patch_bta_av_co, patch_aact, patch_ext_codec, patch_l2c_link)))
 
 
 def generate(framework, output):
     framework, output = Path(framework), Path(output)
-    sources = {name: '#include "repo_ldac_transport.h"\n' + patcher(
+    sources = {name: '#include "repo_ldac_transport.h"\n#include "repo_bt_diag.h"\n' + patcher(
         source_path(framework, name).read_text(encoding='utf-8')) for name, patcher in PATCHERS.items()}
     api = framework / 'components/bt/host/bluedroid/api/include/api/esp_a2dp_api.h'
     sources['include/esp_a2dp_api.h'] = replace_once(api.read_text(encoding='utf-8'), '    } cie;',
         '        uint8_t vendor_info[8];             /*!< Project LDAC capability bytes */\n    } cie;')
-    sources['repo_ldac_transport.h'] = Path(__file__).with_name('repo_ldac_transport.h').read_text()
+    for name in ('repo_ldac_transport.h', 'repo_bt_diag.h', 'repo_bt_diag.c'):
+        sources[name] = Path(__file__).with_name(name).read_text()
     for name, text in sources.items():
         target = output / name
         target.parent.mkdir(parents=True, exist_ok=True)

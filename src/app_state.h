@@ -31,6 +31,8 @@ struct SendspinStatus {
     std::string playback_state;  // "playing", "stopped" or ""
     bool stream_active{false};
     std::string stream_codec;
+    uint32_t sample_rate{0};
+    uint8_t bit_depth{0};
     uint8_t volume{0};
     bool muted{false};
     uint16_t output_delay_ms{0};

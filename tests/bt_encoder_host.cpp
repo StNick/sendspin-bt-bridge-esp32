@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "bt_encoder.h"
+#include "audio_pipe.h"
 #include "host_codec.h"
 #include "repo_ldac_transport.h"
 
@@ -47,7 +48,7 @@ struct Codec { bool aac; int channels; };
 static int live_codecs, opened_bitrate, opened_bitpool;
 int esp_aac_enc_open(void* config, uint32_t, void** out) {
     const auto& cfg = *static_cast<esp_aac_enc_config_t*>(config);
-    assert(cfg.sample_rate == 44100 && cfg.bits_per_sample == 16 && !cfg.adts_used);
+    assert(cfg.sample_rate == AudioPipe::sample_rate() && cfg.bits_per_sample == 16 && !cfg.adts_used);
     opened_bitrate = cfg.bitrate;
     *out = new Codec{true, cfg.channel};
     ++live_codecs;
@@ -55,7 +56,7 @@ int esp_aac_enc_open(void* config, uint32_t, void** out) {
 }
 int esp_sbc_enc_open(void* config, uint32_t, void** out) {
     const auto& cfg = *static_cast<esp_sbc_enc_config_t*>(config);
-    assert(cfg.sample_rate == 44100 && cfg.block_length == 16 && cfg.sub_bands_num == 8);
+    assert(cfg.sample_rate == AudioPipe::sample_rate() && cfg.block_length == 16 && cfg.sub_bands_num == 8);
     opened_bitpool = cfg.bitpool;
     *out = new Codec{false, cfg.ch_mode == ESP_SBC_CH_MODE_MONO ? 1 : 2};
     ++live_codecs;
@@ -102,7 +103,6 @@ static bool fail_once;
 static uint32_t last_timestamp;
 static unsigned last_frames;
 static bool sending_ldac;
-static unsigned ldac_frames_sent;
 extern "C" esp_err_t esp_a2d_source_audio_data_send(esp_a2d_conn_hdl_t connection, esp_a2d_audio_buff_t* packet) {
     assert(connection == 1 && packet->data_len > 0);
     if (sending_ldac) {
@@ -122,7 +122,6 @@ extern "C" esp_err_t esp_a2d_source_audio_data_send(esp_a2d_conn_hdl_t connectio
         return ESP_FAIL;
     }
     if (sent.load()) assert(packet->timestamp > last_timestamp);
-    if (sending_ldac) ldac_frames_sent += packet->number_frame;
     last_timestamp = packet->timestamp;
     last_frames = packet->number_frame;
     esp_a2d_audio_buff_free(packet);
@@ -136,10 +135,39 @@ static void wait_for_packets(unsigned count) {
     assert(sent.load() >= count);
 }
 
+static void test_pcm() {
+    uint8_t packed[6]{}, output[6]{};
+    for (uint8_t bits : {16, 24}) {
+        for (int32_t v : {-8388608, -1536000, 0, 1536000, bits == 16 ? 8388352 : 8388607}) {
+            pcm::write(packed, bits, v);
+            assert(pcm::read(packed, bits) == v);
+        }
+    }
+    pcm::write(packed, 24, 8388607);
+    pcm::write(packed + 3, 24, -8388608);
+    pcm::convert(output, packed, 1, 24, 16, false, 65536);
+    assert(pcm::read(output, 16) == 8388352 && pcm::read(output + 2, 16) == -8388608);
+    pcm::convert(output, packed, 1, 24, 16, true, 65536);
+    assert(pcm::read(output, 16) == 0);
+    for (int32_t v : {-8388608, -1536000, 1536000, 8388606}) {
+        pcm::write(packed, 24, v);
+        pcm::write(packed + 3, 24, v);
+        pcm::convert(output, packed, 1, 24, 24, false, 32768);
+        assert(pcm::read(output, 24) == v / 2 && pcm::read(output + 3, 24) == v / 2);
+        pcm::convert(packed, packed, 1, 24, 24, false, 0);
+        assert(pcm::read(packed, 24) == 0 && pcm::read(packed + 3, 24) == 0);
+    }
+    pcm::write(output, 16, 128); assert(pcm::read(output, 16) == 256);
+    pcm::write(output, 16, -128); assert(pcm::read(output, 16) == -256);
+}
+
 int main() {
+    test_pcm();
     uint8_t caps[11] = {10, 0, 0xff, 0x2d, 1, 0, 0, 0xaa, 0, 0x3c, 1};
     uint8_t config[11]{};
     assert(repo_ldac_preferred_config(config, caps) && config[9] == 0x20);
+    caps[9] = 0x10;
+    assert(repo_ldac_preferred_config(config, caps) && config[9] == 0x10);
     caps[9] = 0x04;  // Recognize a 96 kHz-only speaker, but fall back at 44.1 kHz.
     assert(repo_ldac_info_known(caps) && !repo_ldac_info_valid(caps, false));
     assert(!repo_ldac_config_in_caps(config, caps));
@@ -155,7 +183,10 @@ int main() {
     assert(encoder.configure(aac) && !encoder.mono());
     assert(opened_bitrate == 160000);
     assert(encoder.bitrate_bps() == 160000);
-    auto read = [](uint8_t* pcm, size_t bytes) { memset(pcm, 0, bytes); return static_cast<uint32_t>(bytes / 4); };
+    auto read = [&encoder](uint8_t* pcm, size_t bytes) {
+        memset(pcm, 0, bytes);
+        return static_cast<uint32_t>(bytes / ((encoder.mono() ? 1 : 2) * (encoder.pcm_bits() / 8)));
+    };
     std::atomic<unsigned> played{0};
     auto report = [&played](uint32_t frames, int64_t finish) { assert(finish > 0); played += frames; };
     create_fails = true;
@@ -185,12 +216,14 @@ int main() {
     sent = 0;
     assert(encoder.configure(aac));
     oversize = true;
+    const unsigned played_before_failure = played.load();
     assert(encoder.start(1, 1000, read, report));
     const auto deadline = steady_clock::now() + seconds(2);
     while (!encoder.failed() && steady_clock::now() < deadline) std::this_thread::sleep_for(milliseconds(1));
     assert(encoder.failed());
     encoder.stop();
     assert(sent == 0 && live_packets == 0);
+    assert(played - played_before_failure == 1024); // Consumed PCM is accounted for even if encoding fails.
     // Exercise the actual Sony encoder, including buffered output and an enqueue
     // failure, against the same framing validator used by the receiver project.
     oversize = false;
@@ -203,20 +236,25 @@ int main() {
     sent = 0;
     played = 0;
     unsigned phase = 0;
-    auto tone = [&phase](uint8_t* pcm, size_t bytes) {
-        auto* out = reinterpret_cast<int16_t*>(pcm);
-        for (size_t i = 0; i < bytes / 4; ++i) {
-            out[2 * i] = (phase++ % 64) < 32 ? 6000 : -6000;
-            out[2 * i + 1] = -out[2 * i];
+    unsigned consumed = 0;
+    auto tone = [&phase, &consumed](uint8_t* data, size_t bytes) {
+        const auto bits = AudioPipe::bits_per_sample();
+        const auto width = bits / 8;
+        const unsigned frames = bytes / AudioPipe::bytes_per_frame();
+        for (unsigned i = 0; i < frames; ++i) {
+            const int32_t v = ((phase++ % 64) < 32 ? 6000 : -6000) * 256 + (bits == 24 ? 37 : 0);
+            pcm::write(data + 2 * i * width, bits, v);
+            pcm::write(data + (2 * i + 1) * width, bits, -v);
         }
-        return static_cast<uint32_t>(bytes / 4);
+        consumed += frames;
+        return frames;
     };
     assert(encoder.start(1, 1000, tone, report));
     assert(encoder.bitrate_bps() == 909000);
     wait_for_packets(8);
     encoder.stop();
     assert(!encoder.failed() && last_frames > 1 && played >= 8 * 128 && live_packets == 0);
-    assert(played == ldac_frames_sent * 128);
+    assert(played == consumed);
     const unsigned ldac_before = sent.load();
     encoder.set_ldac_quality(LdacQuality::STANDARD);
     assert(encoder.start(1, 1000, tone, report));
@@ -224,14 +262,66 @@ int main() {
     wait_for_packets(ldac_before + 3);
     encoder.stop();
     assert(!encoder.failed());
-    assert(played == ldac_frames_sent * 128);
+    assert(played == consumed);
     const unsigned before_connection_mode = sent.load();
     encoder.set_ldac_quality(LdacQuality::CONNECTION);
     assert(encoder.start(1, 1000, tone, report));
     assert(encoder.bitrate_bps() == 303000);
     wait_for_packets(before_connection_mode + 3);
     encoder.stop();
-    assert(!encoder.failed() && played == ldac_frames_sent * 128);
+    assert(!encoder.failed() && played == consumed);
+    // Every packed PCM format and LDAC quality, using real Sony bitstreams.
+    for (uint32_t rate : {44100U, 48000U}) {
+        for (uint8_t bits : {16, 24}) {
+            encoder.clear();
+            assert(AudioPipe::configure_format(rate, bits));
+            assert(AudioPipe::frames_to_us(rate) == 1000000);
+            assert(AudioPipe::bytes_per_frame() == 2 * (bits / 8));
+            assert(BtEncoder::register_endpoints() == ESP_OK);
+            assert(endpoints[0].cie.vendor_info[6] == (rate == 44100 ? 0x20 : 0x10));
+            auto fallback = endpoints[1];
+            fallback.cie.m24_info.obj_type = ESP_A2D_M24_CIE_OBJ_TYPE_4_AAC_LC;
+            fallback.cie.m24_info.ch = ESP_A2D_M24_CIE_CH_2;
+            assert(encoder.configure(fallback) && encoder.pcm_bits() == 16);
+            fallback = endpoints[2];
+            fallback.cie.sbc_info.ch_mode = ESP_A2D_SBC_CIE_CH_MODE_JOINT_STEREO;
+            assert(encoder.configure(fallback) && encoder.pcm_bits() == 16);
+            assert(encoder.configure(endpoints[0]) && encoder.pcm_bits() == bits);
+            auto wrong_rate = endpoints[0];
+            wrong_rate.cie.vendor_info[6] = rate == 44100 ? 0x10 : 0x20;
+            assert(!encoder.configure(wrong_rate));
+            assert(encoder.configure(endpoints[0]));
+            for (auto quality : {LdacQuality::HIGH, LdacQuality::STANDARD, LdacQuality::CONNECTION}) {
+                encoder.set_ldac_quality(quality);
+                sent = 0; played = 0; consumed = 0;
+                assert(encoder.start(1, 1000, tone, report));
+                const unsigned high = rate == 44100 ? 909000 : 990000;
+                const unsigned expected = quality == LdacQuality::HIGH ? high :
+                    quality == LdacQuality::STANDARD ? high * 2 / 3 : high / 3;
+                assert(encoder.bitrate_bps() == expected);
+                wait_for_packets(4);
+                encoder.stop();
+                assert(!encoder.failed() && played == consumed && live_packets == 0);
+            }
+            // Partial reads simulate pipe starvation. Only real PCM is reported,
+            // including priming and any PCM consumed before the worker stops.
+            sent = 0; played = 0; consumed = 0;
+            auto partial = [&consumed, bits](uint8_t* data, size_t bytes) {
+                memset(data, 0, bytes);
+                const unsigned real = bytes / (2 * (bits / 8)) / 2;
+                consumed += real;
+                return real;
+            };
+            assert(encoder.start(1, 1000, partial, report));
+            wait_for_packets(3);
+            encoder.stop();
+            assert(played == consumed);
+        }
+    }
+    assert(!AudioPipe::configure_format(96000, 24));
+    assert(!AudioPipe::configure_format(44100, 32));
+    encoder.clear();
+    assert(AudioPipe::configure_format(44100, 16));
     auto wrong_ldac = endpoints[0];
     wrong_ldac.cie.vendor_info[0] = 0;
     assert(!encoder.configure(wrong_ldac));
@@ -240,5 +330,5 @@ int main() {
     encoder.clear();
     assert(encoder.bitrate_bps() == 0);
     assert(live_codecs == 0);
-    puts("PASS: real LDAC encoder/framing, AAC/SBC configuration, retries, timestamps, resume, MTU rejection and cleanup");
+    puts("PASS: 16/24-bit PCM conversion, 44.1/48 kHz LDAC across all quality modes, real LDAC encoder/framing, AAC/SBC configuration, retries, timestamps, resume, MTU rejection and cleanup");
 }

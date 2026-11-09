@@ -85,18 +85,38 @@ using `.pio/build/esp32-s31/firmware.bin`).
 ## Sync and latency
 
 Bluetooth codec negotiation prefers **LDAC**, then **AAC-LC**
-(up to 160 kbit/s), then **SBC**. All use the existing 44.1 kHz, 16-bit PCM pipeline.
-LDAC requires stereo; AAC and SBC support mono down-mixing when negotiated. A speaker must
-advertise a compatible LDAC endpoint; some speakers require HD audio/LDAC to be enabled in
+(up to 160 kbit/s), then **SBC**. Settings select **44.1 or 48 kHz** and **16 or 24 bit**
+for Music Assistant's lossless FLAC input (raw PCM fallback). The default remains 44.1 kHz/16-bit.
+Changing rate or depth restarts the bridge so Sendspin and all Bluetooth endpoints advertise
+one consistent rate. The speaker must support that rate; no rate conversion runs on the board.
+LDAC receives packed 16/24-bit stereo; AAC/SBC convert to 16-bit, with mono down-mixing when
+negotiated. Selecting 24-bit does not add detail to a 16-bit source.
+
+A speaker must advertise a compatible LDAC endpoint; some require HD audio/LDAC enabled in
 their companion app. The connection log lists advertised endpoints and LDAC rate/channel masks.
-The speaker panel shows the Bluetooth codec and encoder bitrate, separately from the incoming
-Sendspin codec. LDAC quality is saved in Settings: High (909 kbit/s), Balanced
-(default, 606 kbit/s), or Connection priority (303 kbit/s). Quality changes apply without a reboot.
-These are LDAC's 44.1 kHz rates; 990/660/330 kbit/s requires a 48 kHz output pipeline, which
-this bridge does not advertise. The bitrate display is the codec rate, not Wi-Fi throughput.
+The speaker panel shows the Bluetooth codec, encoder input format and codec bitrate; the Music
+Assistant panel shows the actual incoming codec and resolution. LDAC quality is saved in Settings:
+
+| Quality | 44.1 kHz | 48 kHz |
+|---|---:|---:|
+| High | 909 kbit/s | 990 kbit/s |
+| Balanced (default) | 606 kbit/s | 660 kbit/s |
+| Connection priority | 303 kbit/s | 330 kbit/s |
+
+Quality changes apply without a reboot. Higher rates increase shared-radio bandwidth and can
+stutter even when encoding is fast enough. The bitrate display is the codec rate, not Wi-Fi throughput.
 LDAC encoding runs on core 1 and processes a transport packet per wake-up. Its float analysis
-uses hardware square roots. `/api/status` includes encoder timing, late-batch, send-retry and
-packet-drop counters to distinguish CPU pressure from Bluetooth backpressure.
+uses hardware square roots. Playback progress reports PCM consumption against a cumulative
+sample clock, including encoder priming and congestion losses, to avoid clock drift from delayed
+packet feedback. The PCM ring holds 400 ms at every resolution.
+
+`/api/status` includes encoder timing, late batches, send retries, dropped packets, PCM buffer
+level and cumulative PCM underrun frames during an active Sendspin stream. Underruns can also
+include stream startup/end gaps; compare counter changes during continuous music. Rising PCM
+underruns with zero Bluetooth retries/drops suggest upstream delivery or scheduling starvation.
+Weak Wi-Fi can cause this; improve reception and try a longer Buffer/Startup lead time or
+Connection priority. The maximum buffer is 3000 ms at 16-bit and 2000 ms at 24-bit so it fits
+Sendspin's advertised receive capacity. Buffer and lead-time changes restart the bridge.
 When upgrading an existing checkout, enable `BT_A2DP_USE_EXTERNAL_CODEC` and
 `BT_A2DP_CODEC_AAC_ENABLED` and set `BT_A2DP_SEP_NUM_MAX` to 3 in the generated
 `sdkconfig.esp32-s31`, or regenerate it from `sdkconfig.defaults` (preserve any board overrides).
@@ -130,20 +150,60 @@ until the speaker lines up with your other players; the value is kept across reb
 Host encoder regression checks (requires the installed ESP-IDF headers) run with:
 
 ```bash
-uv run --with ziglang python tests/run_bt_encoder_host.py
+uv run --python 3.11 --with ziglang python tests/run_bt_encoder_host.py
 python -m unittest discover -s tests -p test_ldac_overlay.py
 ```
 
 These use the real LDAC encoder, AAC/SBC and FreeRTOS test doubles, and checked SDK transforms
-to verify bitstream framing, buffered PCM accounting, retry ownership, timestamps, resume,
+to verify all four PCM formats and LDAC quality modes, packed PCM conversion, bitstream framing,
+consumed-frame accounting, retry ownership, timestamps, resume,
 MTU rejection, cleanup and isolation from other projects. They do not validate the Bluetooth radio.
 
-Builds against ESP-IDF 6.1.0 for the ESP32-S31. Boot, 16 MB PSRAM, networking, SBC negotiation
-and LDAC playback to an Edifier M60 have been checked on hardware. The optimized 606 kbit/s
-mode played smoothly with no late batches, send retries or dropped packets in the observed
-session. The 909 kbit/s mode encoded within its CPU budget but caused Bluetooth queue pressure
-and sync losses on that setup, so 606 kbit/s remains the default. AAC radio playback and other
-speaker combinations still require validation.
+Builds against ESP-IDF 6.1.0 for the ESP32-S31. Boot, 16 MB PSRAM, networking,
+SBC negotiation and LDAC playback to an Edifier M60 have been checked on hardware.
+Both 44.1 kHz/16-bit at 606 kbit/s and 48 kHz/24-bit FLAC at 660 kbit/s were confirmed
+smooth. The final 660 kbit/s capture had no additional PCM underruns, packet drops,
+source-queue rejections or missed encoder deadlines after settling. AAC radio playback,
+other speakers, and broader sync/suspend/reconnect coverage still require hardware validation.
+
+High LDAC quality remains selectable, but was not reliable with simultaneous Wi-Fi on the
+tested setup. At 990 kbit/s, encoding averaged about 0.92 ms per 5.33 ms batch while the
+media path drained only about 777 kbit/s and the source FIFO filled. A controlled test with
+Wi-Fi stopped sustained about 992 kbit/s including media headers, with zero queue rejections.
+This points to coexistence throughput in this SDK/hardware combination; it is not a universal
+limit for every S31 or speaker. Balanced remains the default. CPU and octal PSRAM already
+run at 320 MHz and 200 MHz; no experimental clock, controller-buffer or radio-policy changes
+are included.
+
+### Audio transport diagnostics
+
+`/api/status` includes `bluetooth.transport`: source-queue depth/high-water and packet
+counts, L2CAP backlog/drops, media-write failures, controller buffer completions and longest
+drain/completion gaps. Normal L2CAP recursion deferrals are counted instead of logged on
+every packet. Transport faults are summarized at most once per 10 seconds outside the audio
+path; other SDK errors remain logged.
+
+Counters are relaxed-atomic snapshots and can span adjacent packet operations. Controller
+completions report released HCI buffers, not proof that the speaker played audio. Compare
+counter changes during steady playback: startup, shutdown and reconnection can contribute
+counts or long gaps. `POST /api/diagnostics/transport/reset` resets transport counters only;
+encoder and PCM-underrun counters retain their existing lifetimes.
+
+Capture status once per second and save the final log with:
+
+```bash
+python scripts/capture_audio_diagnostics.py 192.168.31.197 --seconds 90 --output .pio/audio-capture
+uv run --python 3.11 --with ziglang python tests/run_transport_diag_host.py
+```
+
+For password-protected devices, set `SENDSPIN_WEB_PASSWORD` in the environment; the capture
+tool uses HTTP Basic auth as `admin` (override with `--username`). Capture files contain device
+logs and should be reviewed before sharing.
+
+The UI shows Wi-Fi reception as a rating plus dBm. Bluetooth shows its standard BR/EDR
+ideal-range delta in dB and marks absolute dBm unavailable on this S31 controller SDK. No
+unsupported vendor RSSI command is sent. The API's historical `rssi_dbm` field remains a
+compatibility alias for the delta; new clients should use `rssi_delta_db`.
 
 ## Credits
 

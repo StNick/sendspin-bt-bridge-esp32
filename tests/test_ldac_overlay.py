@@ -22,6 +22,24 @@ class OverlayTests(unittest.TestCase):
         start, end = overlay.function_span(source, "target")
         self.assertEqual(source[start:end], '{ /* } */ const char *s = "{"; return 0; }')
 
+    def test_instrumentation_preserves_flow_and_quiets_only_normal_guard(self):
+        framework = Path(os.environ.get("IDF_PATH") or Path.home() / ".platformio/packages/framework-espidf")
+        l2c = overlay.patch_l2c_link(overlay.source_path(framework, "l2c_link.c").read_text())
+        self.assertIn('if (l2cb.is_cong_cback_context) {\n        repo_bt_diag_guard();', l2c)
+        self.assertIn('repo_bt_diag_guard();\n        return;', l2c)
+        self.assertNotIn('L2CAP_TRACE_ERROR("l2cab is_cong_cback_context")', l2c)
+        self.assertIn('L2CAP_TRACE_ERROR ("l2c_link_process_num_completed_pkts: evt too short', l2c)
+        self.assertIn('repo_bt_diag_completed(num_sent, p_lcb->sent_not_acked)', l2c)
+        ext = overlay.patch_ext_codec(overlay.source_path(framework, "btc_a2dp_source_ext_codec.c").read_text())
+        self.assertEqual(ext.count('repo_bt_diag_enqueue('), 4)
+        self.assertIn('repo_bt_diag_read(', ext)
+        self.assertIn('repo_bt_diag_flush();', ext)
+        self.assertIn('#define MAX_OUTPUT_A2DP_SRC_FRAME_QUEUE_SZ     (27)', ext)
+        changed = overlay.source_path(framework, "btc_a2dp_source_ext_codec.c").read_text().replace(
+            '        return FALSE;', '        return 0;', 1)
+        with self.assertRaises(ValueError):
+            overlay.patch_ext_codec(changed)
+
     def test_repeatable_generation_preserves_shared_sdk(self):
         framework = Path(os.environ.get("IDF_PATH") or Path.home() / ".platformio/packages/framework-espidf")
         original = {name: overlay.source_path(framework, name).read_bytes() for name in overlay.SOURCES}

@@ -27,6 +27,7 @@ public:
     void clear();
     const char* codec_name() const;
     uint32_t bitrate_bps() const { return bitrate_bps_; }
+    uint8_t pcm_bits() const { return pcm_bits_; }
     void set_ldac_quality(LdacQuality quality);
     Metrics metrics() const;
     bool mono() const { return channels_ == 1; }
@@ -42,6 +43,7 @@ private:
     bool ldac_{false};
     LdacQuality ldac_quality_{LdacQuality::STANDARD};
     uint32_t bitrate_bps_{0};
+    uint8_t pcm_bits_{16};
     int channels_{2};
     int input_size_{0};
     int output_size_{0};
