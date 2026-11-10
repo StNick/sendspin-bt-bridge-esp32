@@ -30,6 +30,7 @@ idf_component_register(
         espressif__mdns
         espressif__esp_audio_codec
         libldac
+        fdk-aac
         sendspin__sendspin-cpp
         bblanchon__arduinojson
 )

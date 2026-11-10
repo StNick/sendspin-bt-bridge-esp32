@@ -37,12 +37,15 @@ private:
     static void task_entry(void* arg);
     void stream();
     void close();
+    bool open_aac(uint16_t mtu);
 
     void* encoder_{nullptr};
     bool aac_{false};
     bool ldac_{false};
     LdacQuality ldac_quality_{LdacQuality::STANDARD};
     uint32_t bitrate_bps_{0};
+    uint32_t aac_max_bitrate_{0};
+    int64_t encoder_delay_us_{0};
     uint8_t pcm_bits_{16};
     int channels_{2};
     int input_size_{0};

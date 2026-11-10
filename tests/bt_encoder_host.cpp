@@ -12,6 +12,7 @@
 #include "bt_encoder.h"
 #include "audio_pipe.h"
 #include "host_codec.h"
+#include "aacenc_lib.h"
 #include "repo_ldac_transport.h"
 
 using namespace std::chrono;
@@ -45,14 +46,29 @@ void vTaskDelay(TickType_t ms) { std::this_thread::sleep_for(milliseconds(ms)); 
 int64_t esp_timer_get_time() { return duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count(); }
 
 struct Codec { bool aac; int channels; };
-static int live_codecs, opened_bitrate, opened_bitpool;
-int esp_aac_enc_open(void* config, uint32_t, void** out) {
-    const auto& cfg = *static_cast<esp_aac_enc_config_t*>(config);
-    assert(cfg.sample_rate == AudioPipe::sample_rate() && cfg.bits_per_sample == 16 && !cfg.adts_used);
-    opened_bitrate = cfg.bitrate;
-    *out = new Codec{true, cfg.channel};
-    ++live_codecs;
-    return 0;
+static int live_codecs, opened_bitpool;
+// The firmware's FDK-AAC calls land here (see run_bt_encoder_host.py) and reach the real encoder.
+static std::atomic<int> oversize_frames{0};
+extern "C" AACENC_ERROR host_aacEncOpen(HANDLE_AACENCODER* handle, UINT modules, UINT channels) {
+    const auto err = aacEncOpen(handle, modules, channels);
+    if (err == AACENC_OK) ++live_codecs;
+    return err;
+}
+extern "C" AACENC_ERROR host_aacEncClose(HANDLE_AACENCODER* handle) {
+    --live_codecs;
+    return aacEncClose(handle);
+}
+// The next N AAC frames are inflated past any test MTU, as Espressif's encoder could do.
+extern "C" AACENC_ERROR host_aacEncEncode(HANDLE_AACENCODER handle, const AACENC_BufDesc* in,
+                                          const AACENC_BufDesc* out, const AACENC_InArgs* in_args,
+                                          AACENC_OutArgs* out_args) {
+    const auto err = aacEncEncode(handle, in, out, in_args, out_args);
+    if (err == AACENC_OK && in && oversize_frames.load() > 0) {
+        --oversize_frames;
+        assert(out->bufSizes[0] >= 1001);
+        out_args->numOutBytes = 1001;
+    }
+    return err;
 }
 int esp_sbc_enc_open(void* config, uint32_t, void** out) {
     const auto& cfg = *static_cast<esp_sbc_enc_config_t*>(config);
@@ -62,23 +78,10 @@ int esp_sbc_enc_open(void* config, uint32_t, void** out) {
     ++live_codecs;
     return 0;
 }
-int esp_aac_enc_get_frame_size(void* p, int* in, int* out) { *in = 1024 * 2 * static_cast<Codec*>(p)->channels; *out = 500; return 0; }
 int esp_sbc_enc_get_frame_size(void* p, int* in, int* out) { *in = 128 * 2 * static_cast<Codec*>(p)->channels; *out = 119; return 0; }
-int esp_aac_enc_get_info(void*, esp_audio_enc_info_t* info) { info->bitrate = opened_bitrate; return 0; }
 int esp_sbc_enc_get_info(void*, esp_audio_enc_info_t* info) { info->bitrate = 123456; return 0; }
-int esp_aac_enc_reset(void*) { return 0; }
 int esp_sbc_enc_reset(void*) { return 0; }
-void esp_aac_enc_close(void* p) { delete static_cast<Codec*>(p); --live_codecs; }
-void esp_sbc_enc_close(void* p) { esp_aac_enc_close(p); }
-// The next N AAC frames come out larger than any test MTU (the real encoder's bit reservoir).
-static std::atomic<int> oversize_frames{0};
-int esp_aac_enc_process(void*, esp_audio_enc_in_frame_t*, esp_audio_enc_out_frame_t* out) {
-    const bool oversize = oversize_frames.load() > 0;
-    if (oversize) --oversize_frames;
-    out->encoded_bytes = oversize ? 1001 : 400;
-    memset(out->buffer, 0x5a, 400);
-    return 0;
-}
+void esp_sbc_enc_close(void* p) { delete static_cast<Codec*>(p); --live_codecs; }
 static bool sbc_oversize;
 int esp_sbc_enc_process(void* p, esp_audio_enc_in_frame_t* in, esp_audio_enc_out_frame_t* out) {
     out->encoded_bytes = in->len / (128 * 2 * static_cast<Codec*>(p)->channels) * 119;
@@ -108,6 +111,8 @@ static bool fail_once;
 static uint32_t last_timestamp, first_timestamp;
 static unsigned last_frames;
 static bool sending_ldac;
+static uint16_t aac_mtu;  // nonzero while real AAC packets are expected
+static std::atomic<uint32_t> largest_aac{0};
 extern "C" esp_err_t esp_a2d_source_audio_data_send(esp_a2d_conn_hdl_t connection, esp_a2d_audio_buff_t* packet) {
     assert(connection == 1 && packet->data_len > 0);
     if (sending_ldac) {
@@ -117,6 +122,10 @@ extern "C" esp_err_t esp_a2d_source_audio_data_send(esp_a2d_conn_hdl_t connectio
         assert(repo_ldac_payload_valid(payload.data(), payload.size()));
         assert(payload.size() <= 661);
         if (sent.load()) assert(packet->timestamp == last_timestamp + last_frames * 128);
+    } else if (aac_mtu) {
+        // Bluedroid adds up to 20 bytes of LATM; every FDK frame must leave room for it.
+        assert(packet->data_len + 20 <= aac_mtu && packet->number_frame == 1);
+        if (packet->data_len > largest_aac.load()) largest_aac.store(packet->data_len);
     } else {
         assert(packet->data[0] == 0x5a);
     }
@@ -136,7 +145,7 @@ extern "C" esp_err_t esp_a2d_source_audio_data_send(esp_a2d_conn_hdl_t connectio
 }
 
 static void wait_for_packets(unsigned count) {
-    const auto deadline = steady_clock::now() + seconds(2);
+    const auto deadline = steady_clock::now() + seconds(5);
     while (sent.load() < count && steady_clock::now() < deadline) std::this_thread::sleep_for(milliseconds(1));
     assert(sent.load() >= count);
 }
@@ -192,32 +201,70 @@ int main() {
     auto aac = endpoints[1];
     aac.cie.m24_info.obj_type = ESP_A2D_M24_CIE_OBJ_TYPE_4_AAC_LC;
     aac.cie.m24_info.ch = ESP_A2D_M24_CIE_CH_2;
-    assert(encoder.configure(aac) && !encoder.mono());
-    assert(opened_bitrate == 128000);
-    assert(encoder.bitrate_bps() == 128000);
+    assert(encoder.configure(aac) && !encoder.mono() && live_codecs == 1);
+    assert(encoder.bitrate_bps() == 256000);
     auto read = [&encoder](uint8_t* pcm, size_t bytes) {
         memset(pcm, 0, bytes);
         return static_cast<uint32_t>(bytes / ((encoder.mono() ? 1 : 2) * (encoder.pcm_bits() / 8)));
     };
     std::atomic<unsigned> played{0};
-    auto report = [&played](uint32_t frames, int64_t finish) { assert(finish > 0); played += frames; };
+    // Shortest time between a PCM handoff and its reported playout; AAC adds FDK's encoder delay.
+    std::atomic<int64_t> min_lead{INT64_MAX};
+    auto report = [&played, &min_lead](uint32_t frames, int64_t finish) {
+        assert(finish > 0);
+        played += frames;
+        const int64_t lead = finish - esp_timer_get_time();
+        if (lead < min_lead.load()) min_lead.store(lead);
+    };
+    // Full-scale white noise is the hardest input to fit under a peak bitrate.
+    uint32_t noise_state = 1;
+    auto noise = [&noise_state](uint8_t* pcm, size_t bytes) {
+        for (size_t i = 0; i + 1 < bytes; i += 2) {
+            noise_state = noise_state * 1664525U + 1013904223U;
+            const auto sample = static_cast<int16_t>(noise_state >> 16);
+            pcm[i] = static_cast<uint8_t>(sample);
+            pcm[i + 1] = static_cast<uint8_t>(sample >> 8);
+        }
+        return static_cast<uint32_t>(bytes / 4);
+    };
     create_fails = true;
     assert(!encoder.start(1, 1000, read, report));
     create_fails = false;
     fail_once = true;
+    aac_mtu = 1000;
     assert(encoder.start(1, 1000, read, report));
+    assert(encoder.bitrate_bps() == 256000 && live_codecs == 1);  // reopened, not leaked
     wait_for_packets(3);
     encoder.stop();
     assert(!encoder.failed() && played > 0 && last_frames == 1 && live_packets == 0);
+    assert(min_lead.load() >= 30000);  // FDK-AAC delays 44.1 kHz audio by about 36 ms
     const unsigned before = sent.load();
     assert(encoder.start(1, 1000, read, report));
     wait_for_packets(before + 2);
     encoder.stop();
+    assert(!encoder.start(1, 22, read, report));  // no room for any AAC frame
+    // The peak bitrate follows the MTU: noise at a small MTU (bitrate capped below the target)
+    // and at the JBL PartyBox's 882 bytes (target kept) never needs more than one packet.
+    for (uint16_t mtu : {672, 882}) {
+        aac_mtu = mtu;
+        largest_aac = 0;
+        sent = 0;
+        assert(encoder.start(1, mtu, noise, report));
+        const uint32_t peak = (mtu - 22) * 8ULL * 44100 / 1024;
+        const uint32_t expected = std::min<uint32_t>(256000, peak);
+        assert(encoder.bitrate_bps() <= expected && encoder.bitrate_bps() + 1000 >= expected);
+        wait_for_packets(mtu == 672 ? 80 : 40);
+        encoder.stop();
+        assert(!encoder.failed() && encoder.metrics().dropped_packets == 0);
+        assert(largest_aac.load() + 22 <= mtu && largest_aac.load() > (mtu - 22) / 2);
+    }
+    aac_mtu = 0;
 
     auto sbc = endpoints[2];
     sbc.cie.sbc_info.ch_mode = ESP_A2D_SBC_CIE_CH_MODE_MONO;
     sbc.cie.sbc_info.max_bitpool = 31;
     assert(encoder.configure(sbc) && encoder.mono() && opened_bitpool == 31 && live_codecs == 1);
+    assert(min_lead.exchange(INT64_MAX) >= 0);
     assert(encoder.bitrate_bps() == 123456);
     sent = 0;
     assert(encoder.start(1, 1000, read, report));
@@ -240,6 +287,7 @@ int main() {
     // by exactly the skipped frames so later audio keeps its place on the timeline.
     assert(encoder.configure(aac));
     sent = 0;
+    aac_mtu = 1000;
     assert(encoder.start(1, 1000, read, report));
     wait_for_packets(1);
     encoder.stop();  // a stop never advances RTP past the last submitted packet
@@ -255,6 +303,7 @@ int main() {
     assert(first_timestamp == base + 4 * 1024);
     assert(encoder.metrics().dropped_packets == dropped_before_oversize + 3);
     assert(played - played_before_oversize >= 4 * 1024);
+    aac_mtu = 0;
     // Exercise the actual Sony encoder, including buffered output and an enqueue
     // failure, against the same framing validator used by the receiver project.
     encoder.set_ldac_quality(LdacQuality::HIGH);
@@ -360,5 +409,5 @@ int main() {
     encoder.clear();
     assert(encoder.bitrate_bps() == 0);
     assert(live_codecs == 0);
-    puts("PASS: 16/24-bit PCM conversion, 44.1/48 kHz LDAC across all quality modes, real LDAC encoder/framing, AAC/SBC configuration, retries, timestamps, resume, oversized AAC frame skipping, SBC MTU rejection and cleanup");
+    puts("PASS: 16/24-bit PCM conversion, 44.1/48 kHz LDAC across all quality modes, real LDAC encoder/framing, real FDK-AAC with MTU peak caps and encoder delay, AAC/SBC configuration, retries, timestamps, resume, oversized AAC frame skipping, SBC MTU rejection and cleanup");
 }

@@ -32,6 +32,9 @@ Host tests do not exercise the radio. Codec, reconnect and sync changes need a h
 - **Bluetooth:** Bluedroid A2DP source to one speaker. Codec preference is LDAC, then AAC-LC, then
   SBC, through ESP-IDF's external-codec path (`src/bt_encoder.*`). All Bluedroid callbacks are
   copied onto a queue and handled on the `bt_app` task. Public `BtManager` methods are async.
+- **AAC encoder:** Fraunhofer FDK AAC (`components/fdk-aac`, unmodified v2.0.3 encoder libraries),
+  with its peak bitrate set from the MTU so no frame exceeds one media packet. Espressif's AAC
+  encoder only bounds the average and is not used. SBC still comes from `esp_audio_codec`.
 - **LDAC transport overlay:** `cmake/ldac_transport.cmake` runs `scripts/prepare_ldac_transport.py`
   to generate patched copies of six Bluedroid sources in the build directory. Never edit the
   shared ESP-IDF install. Anchors fail closed, so an ESP-IDF or platform upgrade starts here.
@@ -46,10 +49,12 @@ Host tests do not exercise the radio. Codec, reconnect and sync changes need a h
   - "require pairing" off by default
 - **Storage:** settings in NVS namespace `bridge` (`src/app_config.*`). The sendspin-cpp identity
   and pairings are in namespace `sendspin`.
-- **Flash budget:** two 3 MB OTA slots (`partitions.csv`); the image is about 81% of one slot.
+- **Flash budget:** 16 MB flash, two 6 MB OTA slots (`partitions.csv`); the image is about 46% of
+  one slot. A partition-table change needs one USB flash; web-UI OTA cannot change it.
 - **Licences:** the project is MIT and keeps the original's notice. `components/libldac` is
-  Apache 2.0 from AOSP; keep its LICENSE and NOTICE. `espressif/esp_audio_codec` may only be
-  used with Espressif chips.
+  Apache 2.0 from AOSP; keep its LICENSE and NOTICE. `components/fdk-aac` is under the FDK AAC
+  licence; keep its NOTICE, and any source change needs the notices that licence requires.
+  `espressif/esp_audio_codec` may only be used with Espressif chips.
 
 ## Conventions
 
