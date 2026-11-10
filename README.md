@@ -85,7 +85,7 @@ using `.pio/build/esp32-s31/firmware.bin`).
 ## Sync and latency
 
 Bluetooth codec negotiation prefers **LDAC**, then **AAC-LC**
-(up to 160 kbit/s), then **SBC**. Settings select **44.1 or 48 kHz** and **16 or 24 bit**
+(up to 128 kbit/s), then **SBC**. Settings select **44.1 or 48 kHz** and **16 or 24 bit**
 for Music Assistant's lossless FLAC input (raw PCM fallback). The default remains 44.1 kHz/16-bit.
 Changing rate or depth restarts the bridge so Sendspin and all Bluetooth endpoints advertise
 one consistent rate. The speaker must support that rate; no rate conversion runs on the board.

@@ -21,7 +21,10 @@ static_assert(ESP_A2D_MAX_SEPS >= 3, "LDAC/AAC/SBC output requires three A2DP en
 
 namespace {
 constexpr const char* TAG = "bt_encoder";
-constexpr uint32_t AAC_BITRATE = 160000;
+// esp_aac_enc only bounds the average bitrate, so busy passages still produce frames that do not
+// fit the A2DP MTU and must be skipped. Espressif's own AAC source example uses 128 kbit/s; at
+// 160 kbit/s a JBL PartyBox (MTU 882) dropped a frame every minute or two, and in bursts.
+constexpr uint32_t AAC_BITRATE = 128000;
 }
 
 esp_err_t BtEncoder::register_endpoints(bool ldac_enabled) {
@@ -143,6 +146,8 @@ bool BtEncoder::configure(const esp_a2d_mcc_t& codec) {
     }
     ESP_LOGI(TAG, "Negotiated %s, %lu Hz, %u-bit, %d channel(s)", codec_name(),
              static_cast<unsigned long>(AudioPipe::sample_rate()), pcm_bits_, channels_);
+    if (aac_) ESP_LOGI(TAG, "AAC %lu bit/s, encoder output buffer %d bytes",
+                       static_cast<unsigned long>(bitrate_bps_), output_size_);
     return true;
 }
 
