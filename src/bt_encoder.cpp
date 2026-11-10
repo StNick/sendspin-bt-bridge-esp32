@@ -316,6 +316,17 @@ void BtEncoder::stream() {
         if (encode_us > encode_max_us_.load()) encode_max_us_.store(encode_us);
         const uint32_t timestamp = timestamp_;
         const uint32_t packet_samples = ldac_ ? frames_in_packet * LDACBT_ENC_LSU : samples;
+        // The AAC encoder only bounds its average bitrate; its bit reservoir can briefly emit a
+        // frame larger than one media packet (seen: 932 bytes against an 882-byte MTU). Bluedroid
+        // cannot fragment AAC, so skip that one 23 ms frame and keep the RTP clock moving instead
+        // of tearing down the stream.
+        if (aac_ && err == ESP_AUDIO_ERR_OK && out.encoded_bytes > static_cast<uint32_t>(mtu_ - 20)) {
+            ESP_LOGW(TAG, "Skipped an AAC frame larger than the MTU: %lu bytes (MTU %u)",
+                     static_cast<unsigned long>(out.encoded_bytes), mtu_);
+            ++dropped_packets_;
+            if (running_.load()) timestamp_ += packet_samples;  // same rule as a send below
+            continue;
+        }
         if (err != ESP_AUDIO_ERR_OK ||
             out.encoded_bytes > static_cast<uint32_t>(mtu_ - (aac_ ? 20 : 1))) {
             ESP_LOGE(TAG, "Encode/MTU failure: %d, %lu bytes (MTU %u)", err,
@@ -345,7 +356,14 @@ void BtEncoder::stream() {
         // submitted. Congestion drops during playback still consume clock time.
         if (sent == ESP_OK || running_.load()) timestamp_ += packet_samples;
         if (sent != ESP_OK) ++dropped_packets_;
-        if (sent != ESP_OK && sent != ESP_FAIL) break;
+        if (sent != ESP_OK && sent != ESP_FAIL) {
+            // A deliberate stop races the last packet (INVALID_STATE); only report real failures.
+            if (running_.load()) {
+                ESP_LOGE(TAG, "%s packet send failed: %s, %lu bytes (MTU %u)", codec_name(),
+                         esp_err_to_name(sent), static_cast<unsigned long>(out.encoded_bytes), mtu_);
+            }
+            break;
+        }
     }
     running_.store(false);
 }

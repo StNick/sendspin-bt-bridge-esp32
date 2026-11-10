@@ -7,13 +7,15 @@ import argparse
 from pathlib import Path
 import re
 
-SOURCES = ("btc_av.c", "bta_av_co.c", "bta_av_aact.c", "btc_a2dp_source_ext_codec.c", "l2c_link.c")
+SOURCES = ("btc_av.c", "bta_av_co.c", "bta_av_aact.c", "btc_a2dp_source_ext_codec.c", "l2c_link.c",
+           "avdt_msg.c")
 SOURCE_DIR = "components/bt/host/bluedroid/btc/profile/std/a2dp"
 
 
 def source_path(framework, name):
     directory = {"bta_av_aact.c": "components/bt/host/bluedroid/bta/av",
-                 "l2c_link.c": "components/bt/host/bluedroid/stack/l2cap"}.get(name, SOURCE_DIR)
+                 "l2c_link.c": "components/bt/host/bluedroid/stack/l2cap",
+                 "avdt_msg.c": "components/bt/host/bluedroid/stack/avdt"}.get(name, SOURCE_DIR)
     return Path(framework) / directory / name
 
 
@@ -212,11 +214,41 @@ def patch_l2c_link(text):
         '        if (p_lcb) repo_bt_diag_completed(num_sent, p_lcb->sent_not_acked);'))
 
 
-PATCHERS = dict(zip(SOURCES, (patch_btc_av, patch_bta_av_co, patch_aact, patch_ext_codec, patch_l2c_link)))
+def patch_avdt_msg(text):
+    # Stock Bluedroid caps the peer's discovery list at AVDT_NUM_SEPS, the number of *local*
+    # endpoints (CONFIG_BT_A2DP_SEP_NUM_MAX, at most 3). A sink that lists sources or vendor
+    # endpoints first (for example a JBL PartyBox: source, aptX-family sink, source, then SBC and
+    # AAC sinks) loses its usable sinks and the stream open fails. The line above the removed
+    # check already bounds the count by the caller's buffer (BTA_AV_NUM_SEPS entries).
+    return edit_function(text, 'avdt_msg_prs_discover_rsp', lambda body: replace_once(body,
+        '    if (p_msg->discover_rsp.num_seps > AVDT_NUM_SEPS) {\n'
+        '        p_msg->discover_rsp.num_seps = AVDT_NUM_SEPS;\n'
+        '    }\n',
+        '    /* Project overlay: bounded by the caller-supplied buffer above, not by local SEPs. */\n'))
+
+
+def check_discovery_buffer(aact_text, av_int_text):
+    """Fail closed unless every AVDTP discovery still lands in a BTA_AV_NUM_SEPS-entry buffer.
+
+    patch_avdt_msg is only memory-safe because the caller's buffer bounds the parsed count.
+    """
+    call = 'AVDT_DiscoverReq(p_scb->peer_addr, p_scb->sep_info, BTA_AV_NUM_SEPS,'
+    total = aact_text.count('AVDT_DiscoverReq(')
+    if total == 0 or aact_text.count(call) != total:
+        raise ValueError("AVDTP discovery callers changed; re-check the patch_avdt_msg bound")
+    if 'tAVDT_SEP_INFO      sep_info[BTA_AV_NUM_SEPS];' not in av_int_text:
+        raise ValueError("BTA AV discovery buffer changed; re-check the patch_avdt_msg bound")
+
+
+PATCHERS = dict(zip(SOURCES, (patch_btc_av, patch_bta_av_co, patch_aact, patch_ext_codec, patch_l2c_link,
+                              patch_avdt_msg)))
 
 
 def generate(framework, output):
     framework, output = Path(framework), Path(output)
+    check_discovery_buffer(source_path(framework, 'bta_av_aact.c').read_text(encoding='utf-8'),
+                           (framework / 'components/bt/host/bluedroid/bta/av/include/bta_av_int.h')
+                           .read_text(encoding='utf-8'))
     sources = {name: '#include "repo_ldac_transport.h"\n#include "repo_bt_diag.h"\n' + patcher(
         source_path(framework, name).read_text(encoding='utf-8')) for name, patcher in PATCHERS.items()}
     api = framework / 'components/bt/host/bluedroid/api/include/api/esp_a2dp_api.h'

@@ -40,6 +40,26 @@ class OverlayTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             overlay.patch_ext_codec(changed)
 
+    def test_discovery_keeps_every_peer_endpoint(self):
+        # A JBL PartyBox lists six endpoints with its SBC/AAC sinks last; the stock cap at the
+        # local SEP count (3) dropped them. The caller-buffer bound must remain.
+        framework = Path(os.environ.get("IDF_PATH") or Path.home() / ".platformio/packages/framework-espidf")
+        avdt = overlay.patch_avdt_msg(overlay.source_path(framework, "avdt_msg.c").read_text())
+        start, end = overlay.function_span(avdt, "avdt_msg_prs_discover_rsp")
+        body = avdt[start:end]
+        self.assertNotIn("AVDT_NUM_SEPS", body)
+        self.assertIn("if (p_msg->discover_rsp.num_seps > (len / 2)) {", body)
+        self.assertIn("AVDT_SEID_MAX", body)
+        with self.assertRaises(ValueError):
+            overlay.patch_avdt_msg(avdt)
+        aact = overlay.source_path(framework, "bta_av_aact.c").read_text()
+        av_int = (framework / "components/bt/host/bluedroid/bta/av/include/bta_av_int.h").read_text()
+        overlay.check_discovery_buffer(aact, av_int)
+        with self.assertRaises(ValueError):  # a caller with a smaller buffer
+            overlay.check_discovery_buffer(aact.replace("p_scb->sep_info, BTA_AV_NUM_SEPS", "p_scb->sep_info, 3", 1), av_int)
+        with self.assertRaises(ValueError):  # the buffer itself shrank
+            overlay.check_discovery_buffer(aact, av_int.replace("sep_info[BTA_AV_NUM_SEPS]", "sep_info[4]"))
+
     def test_repeatable_generation_preserves_shared_sdk(self):
         framework = Path(os.environ.get("IDF_PATH") or Path.home() / ".platformio/packages/framework-espidf")
         original = {name: overlay.source_path(framework, name).read_bytes() for name in overlay.SOURCES}

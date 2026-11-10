@@ -33,7 +33,7 @@ Host tests do not exercise the radio. Codec, reconnect and sync changes need a h
   SBC, through ESP-IDF's external-codec path (`src/bt_encoder.*`). All Bluedroid callbacks are
   copied onto a queue and handled on the `bt_app` task. Public `BtManager` methods are async.
 - **LDAC transport overlay:** `cmake/ldac_transport.cmake` runs `scripts/prepare_ldac_transport.py`
-  to generate patched copies of five Bluedroid sources in the build directory. Never edit the
+  to generate patched copies of six Bluedroid sources in the build directory. Never edit the
   shared ESP-IDF install. Anchors fail closed, so an ESP-IDF or platform upgrade starts here.
 - **PCM format:** chosen once at boot (44.1/48 kHz, 16/24-bit), advertised identically to Sendspin
   and Bluetooth. There is no resampler on the device.
