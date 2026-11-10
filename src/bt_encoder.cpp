@@ -24,15 +24,20 @@ constexpr const char* TAG = "bt_encoder";
 constexpr uint32_t AAC_BITRATE = 160000;
 }
 
-esp_err_t BtEncoder::register_endpoints() {
-    // Lowest endpoint index wins when we initiate negotiation.
-    esp_a2d_mcc_t ldac{};
-    ldac.type = ESP_A2D_MCT_NON_A2DP;
-    const uint8_t rate = AudioPipe::sample_rate() == 48000 ? REPO_LDAC_RATE_48000 : REPO_LDAC_RATE_44100;
-    const uint8_t ldac_cie[8] = {0x2d, 0x01, 0, 0, 0xaa, 0, rate, REPO_LDAC_STEREO};
-    memcpy(ldac.cie.vendor_info, ldac_cie, sizeof(ldac_cie));
-    esp_err_t err = esp_a2d_source_register_stream_endpoint(0, &ldac);
-    if (err != ESP_OK) return err;
+esp_err_t BtEncoder::register_endpoints(bool ldac_enabled) {
+    // Lowest endpoint index wins when we initiate negotiation. Without LDAC, AAC and SBC take
+    // SEIDs 0 and 1 so the registered endpoints stay contiguous, as in ESP-IDF's examples.
+    esp_err_t err = ESP_OK;
+    uint8_t seid = 0;
+    if (ldac_enabled) {
+        esp_a2d_mcc_t ldac{};
+        ldac.type = ESP_A2D_MCT_NON_A2DP;
+        const uint8_t rate = AudioPipe::sample_rate() == 48000 ? REPO_LDAC_RATE_48000 : REPO_LDAC_RATE_44100;
+        const uint8_t ldac_cie[8] = {0x2d, 0x01, 0, 0, 0xaa, 0, rate, REPO_LDAC_STEREO};
+        memcpy(ldac.cie.vendor_info, ldac_cie, sizeof(ldac_cie));
+        err = esp_a2d_source_register_stream_endpoint(seid++, &ldac);
+        if (err != ESP_OK) return err;
+    }
     esp_a2d_mcc_t aac{};
     aac.type = ESP_A2D_MCT_M24;
     auto& a = aac.cie.m24_info;
@@ -44,7 +49,7 @@ esp_err_t BtEncoder::register_endpoints() {
     a.br1 = (AAC_BITRATE >> 16) & ESP_A2D_M24_CIE_BR1_MSK;
     a.br2 = (AAC_BITRATE >> 8) & ESP_A2D_M24_CIE_BR2_MSK;
     a.br3 = AAC_BITRATE & ESP_A2D_M24_CIE_BR3_MSK;
-    err = esp_a2d_source_register_stream_endpoint(1, &aac);
+    err = esp_a2d_source_register_stream_endpoint(seid++, &aac);
     if (err != ESP_OK) return err;
 
     esp_a2d_mcc_t sbc{};
@@ -58,7 +63,7 @@ esp_err_t BtEncoder::register_endpoints() {
     s.alloc_mthd = ESP_A2D_SBC_CIE_ALLOC_MTHD_LOUDNESS;
     s.min_bitpool = 2;
     s.max_bitpool = 53;
-    return esp_a2d_source_register_stream_endpoint(2, &sbc);
+    return esp_a2d_source_register_stream_endpoint(seid, &sbc);
 }
 
 bool BtEncoder::configure(const esp_a2d_mcc_t& codec) {
@@ -146,7 +151,8 @@ const char* BtEncoder::codec_name() const {
 }
 
 void BtEncoder::set_ldac_quality(LdacQuality quality) {
-    if (ldac_quality_ == quality) return;
+    // OFF only changes endpoint registration at boot; it is not an encoder mode.
+    if (quality == LdacQuality::OFF || ldac_quality_ == quality) return;
     if (ldac_) stop();
     ldac_quality_ = quality;
     if (ldac_) bitrate_bps_ = 0;
@@ -310,6 +316,17 @@ void BtEncoder::stream() {
         if (encode_us > encode_max_us_.load()) encode_max_us_.store(encode_us);
         const uint32_t timestamp = timestamp_;
         const uint32_t packet_samples = ldac_ ? frames_in_packet * LDACBT_ENC_LSU : samples;
+        // The AAC encoder only bounds its average bitrate; its bit reservoir can briefly emit a
+        // frame larger than one media packet (seen: 932 bytes against an 882-byte MTU). Bluedroid
+        // cannot fragment AAC, so skip that one 23 ms frame and keep the RTP clock moving instead
+        // of tearing down the stream.
+        if (aac_ && err == ESP_AUDIO_ERR_OK && out.encoded_bytes > static_cast<uint32_t>(mtu_ - 20)) {
+            ESP_LOGW(TAG, "Skipped an AAC frame larger than the MTU: %lu bytes (MTU %u)",
+                     static_cast<unsigned long>(out.encoded_bytes), mtu_);
+            ++dropped_packets_;
+            if (running_.load()) timestamp_ += packet_samples;  // same rule as a send below
+            continue;
+        }
         if (err != ESP_AUDIO_ERR_OK ||
             out.encoded_bytes > static_cast<uint32_t>(mtu_ - (aac_ ? 20 : 1))) {
             ESP_LOGE(TAG, "Encode/MTU failure: %d, %lu bytes (MTU %u)", err,
@@ -339,7 +356,14 @@ void BtEncoder::stream() {
         // submitted. Congestion drops during playback still consume clock time.
         if (sent == ESP_OK || running_.load()) timestamp_ += packet_samples;
         if (sent != ESP_OK) ++dropped_packets_;
-        if (sent != ESP_OK && sent != ESP_FAIL) break;
+        if (sent != ESP_OK && sent != ESP_FAIL) {
+            // A deliberate stop races the last packet (INVALID_STATE); only report real failures.
+            if (running_.load()) {
+                ESP_LOGE(TAG, "%s packet send failed: %s, %lu bytes (MTU %u)", codec_name(),
+                         esp_err_to_name(sent), static_cast<unsigned long>(out.encoded_bytes), mtu_);
+            }
+            break;
+        }
     }
     running_.store(false);
 }

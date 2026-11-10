@@ -70,16 +70,21 @@ int esp_aac_enc_reset(void*) { return 0; }
 int esp_sbc_enc_reset(void*) { return 0; }
 void esp_aac_enc_close(void* p) { delete static_cast<Codec*>(p); --live_codecs; }
 void esp_sbc_enc_close(void* p) { esp_aac_enc_close(p); }
-static bool oversize;
+// The next N AAC frames come out larger than any test MTU (the real encoder's bit reservoir).
+static std::atomic<int> oversize_frames{0};
 int esp_aac_enc_process(void*, esp_audio_enc_in_frame_t*, esp_audio_enc_out_frame_t* out) {
+    const bool oversize = oversize_frames.load() > 0;
+    if (oversize) --oversize_frames;
     out->encoded_bytes = oversize ? 1001 : 400;
     memset(out->buffer, 0x5a, 400);
     return 0;
 }
+static bool sbc_oversize;
 int esp_sbc_enc_process(void* p, esp_audio_enc_in_frame_t* in, esp_audio_enc_out_frame_t* out) {
     out->encoded_bytes = in->len / (128 * 2 * static_cast<Codec*>(p)->channels) * 119;
     assert(out->encoded_bytes <= out->len);
     memset(out->buffer, 0x5a, out->encoded_bytes);
+    if (sbc_oversize) out->encoded_bytes = 1000;  // a packet-sizing bug; never sent
     return 0;
 }
 
@@ -100,7 +105,7 @@ extern "C" esp_a2d_audio_buff_t* esp_a2d_audio_buff_alloc(uint16_t size) {
 extern "C" void esp_a2d_audio_buff_free(esp_a2d_audio_buff_t* packet) { --live_packets; free(packet); }
 static std::atomic<unsigned> sent{0};
 static bool fail_once;
-static uint32_t last_timestamp;
+static uint32_t last_timestamp, first_timestamp;
 static unsigned last_frames;
 static bool sending_ldac;
 extern "C" esp_err_t esp_a2d_source_audio_data_send(esp_a2d_conn_hdl_t connection, esp_a2d_audio_buff_t* packet) {
@@ -122,6 +127,7 @@ extern "C" esp_err_t esp_a2d_source_audio_data_send(esp_a2d_conn_hdl_t connectio
         return ESP_FAIL;
     }
     if (sent.load()) assert(packet->timestamp > last_timestamp);
+    else first_timestamp = packet->timestamp;
     last_timestamp = packet->timestamp;
     last_frames = packet->number_frame;
     esp_a2d_audio_buff_free(packet);
@@ -174,7 +180,13 @@ int main() {
     caps[3] = 0x4f;  // Another vendor must never enter the LDAC transport.
     assert(!repo_ldac_info_known(caps));
     BtEncoder encoder;
-    assert(BtEncoder::register_endpoints() == ESP_OK);
+    // LDAC off: AAC and SBC take the first two endpoint IDs, with nothing left in the third.
+    memset(endpoints, 0xee, sizeof(endpoints));  // sentinel: SBC is type 0
+    assert(BtEncoder::register_endpoints(false) == ESP_OK);
+    assert(endpoints[0].type == ESP_A2D_MCT_M24 && endpoints[1].type == ESP_A2D_MCT_SBC &&
+           endpoints[2].type == 0xee);
+    encoder.set_ldac_quality(LdacQuality::OFF);  // not an encoder mode; must be ignored
+    assert(BtEncoder::register_endpoints(true) == ESP_OK);
     assert(endpoints[0].type == ESP_A2D_MCT_NON_A2DP && endpoints[1].type == ESP_A2D_MCT_M24 &&
            endpoints[2].type == ESP_A2D_MCT_SBC);
     auto aac = endpoints[1];
@@ -212,21 +224,39 @@ int main() {
     wait_for_packets(2);
     encoder.stop();
     assert(last_frames == 7 && live_packets == 0);
-
+    // Unlike AAC, an SBC packet over the MTU is a sizing bug: fail closed, send nothing.
+    sbc_oversize = true;
     sent = 0;
-    assert(encoder.configure(aac));
-    oversize = true;
-    const unsigned played_before_failure = played.load();
     assert(encoder.start(1, 1000, read, report));
-    const auto deadline = steady_clock::now() + seconds(2);
+    auto deadline = steady_clock::now() + seconds(2);
     while (!encoder.failed() && steady_clock::now() < deadline) std::this_thread::sleep_for(milliseconds(1));
     assert(encoder.failed());
     encoder.stop();
     assert(sent == 0 && live_packets == 0);
-    assert(played - played_before_failure == 1024); // Consumed PCM is accounted for even if encoding fails.
+    sbc_oversize = false;
+
+    // An AAC frame larger than one media packet (the encoder's bit reservoir can do this) is
+    // skipped: the stream keeps running, the PCM is still accounted for, and RTP time advances
+    // by exactly the skipped frames so later audio keeps its place on the timeline.
+    assert(encoder.configure(aac));
+    sent = 0;
+    assert(encoder.start(1, 1000, read, report));
+    wait_for_packets(1);
+    encoder.stop();  // a stop never advances RTP past the last submitted packet
+    const uint32_t base = last_timestamp;
+    const unsigned played_before_oversize = played.load();
+    const uint32_t dropped_before_oversize = encoder.metrics().dropped_packets;
+    oversize_frames = 3;
+    sent = 0;
+    assert(encoder.start(1, 1000, read, report));
+    wait_for_packets(1);
+    encoder.stop();
+    assert(!encoder.failed() && live_packets == 0 && oversize_frames == 0);
+    assert(first_timestamp == base + 4 * 1024);
+    assert(encoder.metrics().dropped_packets == dropped_before_oversize + 3);
+    assert(played - played_before_oversize >= 4 * 1024);
     // Exercise the actual Sony encoder, including buffered output and an enqueue
     // failure, against the same framing validator used by the receiver project.
-    oversize = false;
     encoder.set_ldac_quality(LdacQuality::HIGH);
     assert(encoder.configure(endpoints[0]) && !encoder.mono() && live_codecs == 0);
     assert(strcmp(encoder.codec_name(), "LDAC") == 0);
@@ -277,7 +307,7 @@ int main() {
             assert(AudioPipe::configure_format(rate, bits));
             assert(AudioPipe::frames_to_us(rate) == 1000000);
             assert(AudioPipe::bytes_per_frame() == 2 * (bits / 8));
-            assert(BtEncoder::register_endpoints() == ESP_OK);
+            assert(BtEncoder::register_endpoints(true) == ESP_OK);
             assert(endpoints[0].cie.vendor_info[6] == (rate == 44100 ? 0x20 : 0x10));
             auto fallback = endpoints[1];
             fallback.cie.m24_info.obj_type = ESP_A2D_M24_CIE_OBJ_TYPE_4_AAC_LC;
@@ -330,5 +360,5 @@ int main() {
     encoder.clear();
     assert(encoder.bitrate_bps() == 0);
     assert(live_codecs == 0);
-    puts("PASS: 16/24-bit PCM conversion, 44.1/48 kHz LDAC across all quality modes, real LDAC encoder/framing, AAC/SBC configuration, retries, timestamps, resume, MTU rejection and cleanup");
+    puts("PASS: 16/24-bit PCM conversion, 44.1/48 kHz LDAC across all quality modes, real LDAC encoder/framing, AAC/SBC configuration, retries, timestamps, resume, oversized AAC frame skipping, SBC MTU rejection and cleanup");
 }

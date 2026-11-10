@@ -30,6 +30,7 @@ using esp_err_t = int;
     "esp_log.h": """
 #pragma once
 #define ESP_LOGI(...) ((void)0)
+#define ESP_LOGW(...) ((void)0)
 #define ESP_LOGE(...) ((void)0)
 """,
     "esp_timer.h": """

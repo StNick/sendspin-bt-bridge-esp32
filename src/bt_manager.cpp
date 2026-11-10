@@ -229,7 +229,9 @@ esp_err_t BtManager::init(const AppConfig& config, AudioPipe* pipe, Callbacks ca
         ESP_LOGE(TAG, "A2DP source init failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = BtEncoder::register_endpoints();
+    const bool ldac_enabled = config.ldac_quality != LdacQuality::OFF;
+    required_seps_ = ldac_enabled ? 0b111 : 0b011;
+    err = BtEncoder::register_endpoints(ldac_enabled);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "A2DP codec registration failed: %s", esp_err_to_name(err));
         return err;
@@ -541,7 +543,7 @@ void BtManager::tick() {
         apply_tg_filter();  // no-op until AVRCP TG init has completed
     }
 
-    if (registered_seps_ == 7 && conn_ == Conn::DISCONNECTED && has_target_ && !standby_ && !gave_up_ && !scanning_ &&
+    if (registered_seps_ == required_seps_ && conn_ == Conn::DISCONNECTED && has_target_ && !standby_ && !gave_up_ && !scanning_ &&
         now >= next_attempt_us_) {
         start_connect();
     }
@@ -557,7 +559,10 @@ void BtManager::tick() {
             if (encoder_.failed() || !encoder_.start(audio_connection_, audio_mtu_,
                     [this](uint8_t* data, size_t bytes) { return read_pcm(data, bytes); },
                     callbacks_.frames_played)) {
-                ESP_LOGE(TAG, "Bluetooth encoder failed; reconnecting");
+                ESP_LOGE(TAG, "Bluetooth %s encoder failed; reconnecting", encoder_.codec_name());
+                if (strcmp(encoder_.codec_name(), "LDAC") == 0) {
+                    ESP_LOGE(TAG, "If this repeats, set LDAC quality to Off to use AAC/SBC instead");
+                }
                 encoder_.stop();
                 esp_a2d_source_disconnect(peer_.data());
                 conn_ = Conn::DISCONNECTING;
@@ -1085,7 +1090,7 @@ void BtManager::publish(const char* event) {
         last_event_ = event;
     }
     BtStatus s;
-    s.ready = registered_seps_ == 7;
+    s.ready = registered_seps_ == required_seps_;
     s.local_mac = local_mac_;
     s.has_target = has_target_;
     if (has_target_) {

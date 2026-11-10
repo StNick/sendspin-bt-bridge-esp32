@@ -20,7 +20,7 @@ public:
     using ReadPcm = std::function<uint32_t(uint8_t*, size_t)>;
     using Played = std::function<void(uint32_t, int64_t)>;
 
-    static esp_err_t register_endpoints();
+    static esp_err_t register_endpoints(bool ldac);
     bool configure(const esp_a2d_mcc_t& codec);
     bool start(esp_a2d_conn_hdl_t connection, uint16_t mtu, ReadPcm read, Played played);
     void stop();

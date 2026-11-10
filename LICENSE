@@ -27,5 +27,9 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-Third-party components fetched at build time (not part of this repository) keep their own
-licenses, notably sendspin-cpp (Apache License 2.0) and ESP-IDF (Apache License 2.0).
+Third-party components keep their own licenses and are not covered by this notice:
+- sendspin-cpp (Apache License 2.0) and ESP-IDF (Apache License 2.0), fetched at build time
+- espressif/esp_audio_codec (Espressif Modified MIT License; use only with Espressif
+  products), fetched at build time
+- components/libldac, Sony's LDAC encoder from AOSP, vendored in this repository (Apache
+  License 2.0; see components/libldac/LICENSE and NOTICE)

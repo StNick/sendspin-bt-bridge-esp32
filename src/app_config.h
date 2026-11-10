@@ -26,7 +26,9 @@ enum class KeepAliveMethod : uint8_t {
     NONE = 2,        // no burst
 };
 
-enum class LdacQuality : uint8_t { HIGH = 0, STANDARD = 1, CONNECTION = 2 };
+// OFF does not register the LDAC endpoint, so AAC/SBC are negotiated. Changing to or from OFF
+// takes effect after a restart (endpoints are registered once at boot).
+enum class LdacQuality : uint8_t { HIGH = 0, STANDARD = 1, CONNECTION = 2, OFF = 3 };
 const char* ldac_quality_name(LdacQuality quality);
 bool ldac_quality_from_name(const std::string& name, LdacQuality* out);
 
