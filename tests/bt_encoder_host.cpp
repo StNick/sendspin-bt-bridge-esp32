@@ -193,8 +193,8 @@ int main() {
     aac.cie.m24_info.obj_type = ESP_A2D_M24_CIE_OBJ_TYPE_4_AAC_LC;
     aac.cie.m24_info.ch = ESP_A2D_M24_CIE_CH_2;
     assert(encoder.configure(aac) && !encoder.mono());
-    assert(opened_bitrate == 160000);
-    assert(encoder.bitrate_bps() == 160000);
+    assert(opened_bitrate == 128000);
+    assert(encoder.bitrate_bps() == 128000);
     auto read = [&encoder](uint8_t* pcm, size_t bytes) {
         memset(pcm, 0, bytes);
         return static_cast<uint32_t>(bytes / ((encoder.mono() ? 1 : 2) * (encoder.pcm_bits() / 8)));
