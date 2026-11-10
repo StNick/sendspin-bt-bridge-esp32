@@ -179,7 +179,7 @@ bool BtEncoder::open_aac(uint16_t mtu) {
         {AACENC_BITRATEMODE, 0},  // CBR, as advertised
         {AACENC_BITRATE, bitrate},
         {AACENC_TRANSMUX, TT_MP4_RAW},  // Bluedroid adds LATM
-        {AACENC_AFTERBURNER, 1},
+        {AACENC_AFTERBURNER, aac_afterburner_ ? 1U : 0U},
     };
     for (const auto& p : params) {
         if (aacEncoder_SetParam(handle, p.param, p.value) != AACENC_OK) return false;
@@ -207,6 +207,12 @@ void BtEncoder::set_ldac_quality(LdacQuality quality) {
     if (ldac_) stop();
     ldac_quality_ = quality;
     if (ldac_) bitrate_bps_ = 0;
+}
+
+void BtEncoder::set_aac_afterburner(bool enabled) {
+    if (aac_afterburner_ == enabled) return;
+    if (aac_) stop();
+    aac_afterburner_ = enabled;
 }
 
 BtEncoder::Metrics BtEncoder::metrics() const {
@@ -249,9 +255,9 @@ bool BtEncoder::start(esp_a2d_conn_hdl_t connection, uint16_t mtu, ReadPcm read,
             ESP_LOGE(TAG, "Cannot initialize AAC for MTU %u", mtu);
             return false;
         }
-        ESP_LOGI(TAG, "AAC: %lu bit/s, frames capped at %d bytes (MTU %u), encoder delay %lld us",
+        ESP_LOGI(TAG, "AAC: %lu bit/s, frames capped at %d bytes (MTU %u), encoder delay %lld us, afterburner %s",
                  static_cast<unsigned long>(bitrate_bps_), mtu - AAC_LATM_RESERVE - AAC_PEAK_MARGIN, mtu,
-                 static_cast<long long>(encoder_delay_us_));
+                 static_cast<long long>(encoder_delay_us_), aac_afterburner_ ? "on" : "off");
     } else if (esp_sbc_enc_reset(encoder_) != ESP_AUDIO_ERR_OK) {
         return false;
     }

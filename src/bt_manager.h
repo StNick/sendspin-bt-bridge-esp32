@@ -97,6 +97,7 @@ public:
     void set_policy(uint16_t check_interval_s, uint16_t max_reconnect_fails);
     void set_pin(const std::string& pin);
     void set_ldac_quality(LdacQuality quality);
+    void set_aac_afterburner(bool enabled);
 
     void set_audio_active(bool active) { audio_active_.store(active); }
     BtStatus status();

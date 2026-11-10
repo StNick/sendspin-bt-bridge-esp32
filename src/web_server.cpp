@@ -333,6 +333,7 @@ esp_err_t handle_get_config(httpd_req_t* req) {
     doc["bt_max_reconnect_fails"] = c.bt_max_reconnect_fails;
     doc["bt_pin"] = c.bt_pin;
     doc["ldac_quality"] = ldac_quality_name(c.ldac_quality);
+    doc["aac_afterburner"] = c.aac_afterburner;
     doc["audio_sample_rate"] = c.audio_sample_rate;
     doc["audio_bit_depth"] = c.audio_bit_depth;
     doc["min_buffer_ms"] = c.min_buffer_ms;
@@ -402,6 +403,12 @@ esp_err_t handle_post_config(httpd_req_t* req) {
     if (in["require_pairing"].is<bool>()) {
         c.require_pairing = in["require_pairing"].as<bool>();
     }
+    if (!in["aac_afterburner"].isNull()) {
+        if (!in["aac_afterburner"].is<bool>()) {
+            return send_error(req, "400 Bad Request", "aac_afterburner must be true or false");
+        }
+        c.aac_afterburner = in["aac_afterburner"].as<bool>();
+    }
     if (!in["ldac_quality"].isNull()) {
         if (!in["ldac_quality"].is<const char*>() ||
             !ldac_quality_from_name(in["ldac_quality"].as<std::string>(), &c.ldac_quality)) {
@@ -469,6 +476,7 @@ esp_err_t handle_post_config(httpd_req_t* req) {
         cur.lead_time_ms = c.lead_time_ms;
         cur.bt_pin = c.bt_pin;
         cur.ldac_quality = c.ldac_quality;
+        cur.aac_afterburner = c.aac_afterburner;
         cur.audio_sample_rate = c.audio_sample_rate;
         cur.audio_bit_depth = c.audio_bit_depth;
         cur.web_password = c.web_password;

@@ -133,7 +133,7 @@ with tempfile.TemporaryDirectory(prefix="bt-encoder-") as temp:
     # and can inflate a frame to exercise the oversized-frame path. The test itself calls FDK.
     encoder_obj = work / "bt_encoder.o"
     subprocess.run([*common, "-DaacEncOpen=host_aacEncOpen", "-DaacEncClose=host_aacEncClose",
-                    "-DaacEncEncode=host_aacEncEncode",
+                    "-DaacEncEncode=host_aacEncEncode", "-DaacEncoder_SetParam=host_aacEncoder_SetParam",
                     "-c", str(ROOT / "src/bt_encoder.cpp"), "-o", str(encoder_obj)], check=True)
     subprocess.run([*common, str(ROOT / "tests/bt_encoder_host.cpp"), str(encoder_obj),
                     *objects, "-o", str(executable)], check=True)

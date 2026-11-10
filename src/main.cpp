@@ -647,6 +647,9 @@ WebActions make_web_actions() {
             if (before.ldac_quality != after.ldac_quality) {
                 BtManager::instance().set_ldac_quality(after.ldac_quality);
             }
+            if (before.aac_afterburner != after.aac_afterburner) {
+                BtManager::instance().set_aac_afterburner(after.aac_afterburner);
+            }
             if (before.require_pairing != after.require_pairing && g_client != nullptr) {
                 g_client->set_unpaired_access_enabled(!after.require_pairing);
             }

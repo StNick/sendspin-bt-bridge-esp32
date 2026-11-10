@@ -114,6 +114,7 @@ esp_err_t write_all(const AppConfig& c) {
     check(nvs_set_str(h, "spk_name", c.speaker_name.c_str()));
     check(nvs_set_str(h, "bt_pin", c.bt_pin.c_str()));
     check(nvs_set_u8(h, "ldac_quality", static_cast<uint8_t>(c.ldac_quality)));
+    check(nvs_set_u8(h, "aac_ab", c.aac_afterburner ? 1 : 0));
     check(nvs_set_u16(h, "audio_rate", static_cast<uint16_t>(c.audio_sample_rate)));
     check(nvs_set_u8(h, "audio_bits", c.audio_bit_depth));
     check(nvs_set_u8(h, "idle_mode", static_cast<uint8_t>(c.idle_mode)));
@@ -239,6 +240,7 @@ esp_err_t init() {
         c.speaker_name = read_str(h, "spk_name", "");
         c.bt_pin = read_str(h, "bt_pin", "0000");
         c.ldac_quality = static_cast<LdacQuality>(read_u8(h, "ldac_quality", 1));
+        c.aac_afterburner = read_u8(h, "aac_ab", 0) != 0;
         c.audio_sample_rate = read_u16(h, "audio_rate", 44100);
         c.audio_bit_depth = read_u8(h, "audio_bits", 16);
         c.idle_mode = static_cast<IdleMode>(read_u8(h, "idle_mode", 0));

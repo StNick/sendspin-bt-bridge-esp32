@@ -58,6 +58,11 @@ extern "C" AACENC_ERROR host_aacEncClose(HANDLE_AACENCODER* handle) {
     --live_codecs;
     return aacEncClose(handle);
 }
+static int last_afterburner = -1;  // value the firmware last gave FDK
+extern "C" AACENC_ERROR host_aacEncoder_SetParam(HANDLE_AACENCODER handle, AACENC_PARAM param, UINT value) {
+    if (param == AACENC_AFTERBURNER) last_afterburner = static_cast<int>(value);
+    return aacEncoder_SetParam(handle, param, value);
+}
 // The next N AAC frames are inflated past any test MTU, as Espressif's encoder could do.
 extern "C" AACENC_ERROR host_aacEncEncode(HANDLE_AACENCODER handle, const AACENC_BufDesc* in,
                                           const AACENC_BufDesc* out, const AACENC_InArgs* in_args,
@@ -202,7 +207,7 @@ int main() {
     aac.cie.m24_info.obj_type = ESP_A2D_M24_CIE_OBJ_TYPE_4_AAC_LC;
     aac.cie.m24_info.ch = ESP_A2D_M24_CIE_CH_2;
     assert(encoder.configure(aac) && !encoder.mono() && live_codecs == 1);
-    assert(encoder.bitrate_bps() == 256000);
+    assert(encoder.bitrate_bps() == 256000 && last_afterburner == 0);  // off unless enabled
     auto read = [&encoder](uint8_t* pcm, size_t bytes) {
         memset(pcm, 0, bytes);
         return static_cast<uint32_t>(bytes / ((encoder.mono() ? 1 : 2) * (encoder.pcm_bits() / 8)));
@@ -258,6 +263,21 @@ int main() {
         assert(!encoder.failed() && encoder.metrics().dropped_packets == 0);
         assert(largest_aac.load() + 22 <= mtu && largest_aac.load() > (mtu - 22) / 2);
     }
+    // Toggling the afterburner stops a running AAC encoder without marking it failed; the next
+    // start (bt_app restarts it) reopens FDK with the new setting and keeps streaming.
+    aac_mtu = 882;
+    sent = 0;
+    assert(encoder.start(1, 882, noise, report) && last_afterburner == 0);
+    wait_for_packets(2);
+    encoder.set_aac_afterburner(true);
+    assert(!encoder.failed());
+    const unsigned before_afterburner = sent.load();
+    assert(encoder.start(1, 882, noise, report) && last_afterburner == 1 && live_codecs == 1);
+    wait_for_packets(before_afterburner + 3);
+    encoder.set_aac_afterburner(false);
+    assert(encoder.start(1, 882, noise, report) && last_afterburner == 0);
+    encoder.stop();
+    assert(!encoder.failed() && live_packets == 0);
     aac_mtu = 0;
 
     auto sbc = endpoints[2];
@@ -409,5 +429,5 @@ int main() {
     encoder.clear();
     assert(encoder.bitrate_bps() == 0);
     assert(live_codecs == 0);
-    puts("PASS: 16/24-bit PCM conversion, 44.1/48 kHz LDAC across all quality modes, real LDAC encoder/framing, real FDK-AAC with MTU peak caps and encoder delay, AAC/SBC configuration, retries, timestamps, resume, oversized AAC frame skipping, SBC MTU rejection and cleanup");
+    puts("PASS: 16/24-bit PCM conversion, 44.1/48 kHz LDAC across all quality modes, real LDAC encoder/framing, real FDK-AAC with MTU peak caps, encoder delay and afterburner toggling, AAC/SBC configuration, retries, timestamps, resume, oversized AAC frame skipping, SBC MTU rejection and cleanup");
 }

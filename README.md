@@ -132,7 +132,10 @@ peak-bitrate limit is set from the speaker's MTU, so every AAC frame fits one Bl
 packet; the average target is lowered only when the MTU is too small for 256 kbit/s. Espressif's
 encoder, used before, only bounds the average bitrate, so dense music produced frames that had
 to be skipped (audible 23 ms gaps). FDK delays audio by about 36 ms at 44.1 kHz; that delay is
-reported to Sendspin's sync, so it does not need a manual static delay. FDK's licence grants no
+reported to Sendspin's sync, so it does not need a manual static delay. FDK's optional
+**afterburner** (Settings → "AAC afterburner") gives slightly better AAC at about 2.5× the encoding
+CPU. It is off by default: with it on, dense music at 256 kbit/s took up to 30 ms to encode a
+23 ms frame on the S31. Changing it restarts only the AAC encoder. FDK's licence grants no
 AAC patent rights (see its NOTICE); as with LDAC, a commercial product must handle that itself.
 
 LDAC uses the pinned Sony/AOSP encoder in `components/libldac` (Apache 2.0; upstream LICENSE

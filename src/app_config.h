@@ -51,6 +51,9 @@ struct AppConfig {
     std::string speaker_name;
     std::string bt_pin{"0000"};  // legacy (pre-2.1) PIN pairing only
     LdacQuality ldac_quality{LdacQuality::STANDARD};
+    // FDK-AAC's afterburner: slightly better AAC at about 2.5x the encoding CPU. Off by default
+    // because at 256 kbit/s the S31 then had little margin per 23 ms frame.
+    bool aac_afterburner{false};
     uint32_t audio_sample_rate{44100};
     uint8_t audio_bit_depth{16};
 

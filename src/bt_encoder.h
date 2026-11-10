@@ -29,6 +29,8 @@ public:
     uint32_t bitrate_bps() const { return bitrate_bps_; }
     uint8_t pcm_bits() const { return pcm_bits_; }
     void set_ldac_quality(LdacQuality quality);
+    // Applies from the next start(); a running AAC encoder stops and bt_app restarts it.
+    void set_aac_afterburner(bool enabled);
     Metrics metrics() const;
     bool mono() const { return channels_ == 1; }
     bool failed() const { return task_active_ && !running_.load(); }
@@ -45,6 +47,7 @@ private:
     LdacQuality ldac_quality_{LdacQuality::STANDARD};
     uint32_t bitrate_bps_{0};
     uint32_t aac_max_bitrate_{0};
+    bool aac_afterburner_{false};
     int64_t encoder_delay_us_{0};
     uint8_t pcm_bits_{16};
     int channels_{2};
