@@ -250,18 +250,28 @@ int main() {
     assert(!encoder.start(1, 22, read, report));  // no room for any AAC frame
     // The peak bitrate follows the MTU: noise at a small MTU (bitrate capped below the target)
     // and at the JBL PartyBox's 882 bytes (target kept) never needs more than one packet.
-    for (uint16_t mtu : {672, 882}) {
-        aac_mtu = mtu;
-        largest_aac = 0;
-        sent = 0;
-        assert(encoder.start(1, mtu, noise, report));
-        const uint32_t peak = (mtu - 22) * 8ULL * 44100 / 1024;
-        const uint32_t expected = std::min<uint32_t>(256000, peak);
-        assert(encoder.bitrate_bps() <= expected && encoder.bitrate_bps() + 1000 >= expected);
-        wait_for_packets(mtu == 672 ? 80 : 40);
-        encoder.stop();
-        assert(!encoder.failed() && encoder.metrics().dropped_packets == 0);
-        assert(largest_aac.load() + 22 <= mtu && largest_aac.load() > (mtu - 22) / 2);
+    // Both supported rates: a 48 kHz frame is shorter, so the same MTU allows a higher peak.
+    for (uint32_t rate : {48000U, 44100U}) {  // ends on 44.1 kHz for the tests below
+        encoder.clear();
+        assert(AudioPipe::configure_format(rate, 16));
+        assert(BtEncoder::register_endpoints(true) == ESP_OK);
+        aac = endpoints[1];
+        aac.cie.m24_info.obj_type = ESP_A2D_M24_CIE_OBJ_TYPE_4_AAC_LC;
+        aac.cie.m24_info.ch = ESP_A2D_M24_CIE_CH_2;
+        assert(encoder.configure(aac) && live_codecs == 1);
+        for (uint16_t mtu : {672, 882}) {
+            aac_mtu = mtu;
+            largest_aac = 0;
+            sent = 0;
+            assert(encoder.start(1, mtu, noise, report));
+            const uint32_t peak = (mtu - 22) * 8ULL * rate / 1024;
+            const uint32_t expected = std::min<uint32_t>(256000, peak);
+            assert(encoder.bitrate_bps() <= expected && encoder.bitrate_bps() + 1000 >= expected);
+            wait_for_packets(mtu == 672 ? 80 : 40);
+            encoder.stop();
+            assert(!encoder.failed() && encoder.metrics().dropped_packets == 0);
+            assert(largest_aac.load() + 22 <= mtu && largest_aac.load() > (mtu - 22) / 2);
+        }
     }
     // Toggling the afterburner stops a running AAC encoder without marking it failed; the next
     // start (bt_app restarts it) reopens FDK with the new setting and keeps streaming.
@@ -429,5 +439,5 @@ int main() {
     encoder.clear();
     assert(encoder.bitrate_bps() == 0);
     assert(live_codecs == 0);
-    puts("PASS: 16/24-bit PCM conversion, 44.1/48 kHz LDAC across all quality modes, real LDAC encoder/framing, real FDK-AAC with MTU peak caps, encoder delay and afterburner toggling, AAC/SBC configuration, retries, timestamps, resume, oversized AAC frame skipping, SBC MTU rejection and cleanup");
+    puts("PASS: 16/24-bit PCM conversion, 44.1/48 kHz LDAC across all quality modes, real LDAC encoder/framing, real FDK-AAC at 44.1/48 kHz with MTU peak caps, encoder delay and afterburner toggling, AAC/SBC configuration, retries, timestamps, resume, oversized AAC frame skipping, SBC MTU rejection and cleanup");
 }

@@ -183,6 +183,7 @@ esp_err_t handle_status(httpd_req_t* req) {
     sys["uptime_s"] = static_cast<uint32_t>(esp_timer_get_time() / 1000000LL);
     sys["heap_internal_free"] = static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     sys["heap_internal_min"] = static_cast<uint32_t>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
+    sys["heap_internal_largest"] = static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     sys["psram_total"] = static_cast<uint32_t>(heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
     sys["psram_free"] = static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     sys["name"] = cfg.name;
