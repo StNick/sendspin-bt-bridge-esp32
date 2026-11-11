@@ -44,7 +44,7 @@ ESP-IDF, not a line-by-line translation:
 - An **ESP32-S31** board with **PSRAM** (sendspin-cpp holds about 1.3 MB of audio in external RAM).
   The default target is Espressif's **ESP32-S31-Function-CoreBoard-1** (16 MB flash, 16 MB octal
   PSRAM). Other S31 boards work: pick the matching `board` in `platformio.ini` and set
-  `CONFIG_ESPTOOLPY_FLASHSIZE_*` in `sdkconfig.defaults`. The partition table needs 8 MB of flash.
+  `CONFIG_ESPTOOLPY_FLASHSIZE_*` in `sdkconfig.defaults`. The partition table needs 16 MB of flash.
   Without PSRAM the firmware still boots and the web UI explains that Sendspin is disabled.
 - Not ESP32-S3: the S3 has no Bluetooth Classic, so it cannot do A2DP. The S31 has BR/EDR.
 - A Music Assistant server with the Sendspin provider enabled, on the same network.
@@ -85,7 +85,7 @@ using `.pio/build/esp32-s31/firmware.bin`).
 ## Sync and latency
 
 Bluetooth codec negotiation prefers **LDAC**, then **AAC-LC**
-(up to 128 kbit/s), then **SBC**. Settings select **44.1 or 48 kHz** and **16 or 24 bit**
+(up to 256 kbit/s), then **SBC**. Settings select **44.1 or 48 kHz** and **16 or 24 bit**
 for Music Assistant's lossless FLAC input (raw PCM fallback). The default remains 44.1 kHz/16-bit.
 Changing rate or depth restarts the bridge so Sendspin and all Bluetooth endpoints advertise
 one consistent rate. The speaker must support that rate; no rate conversion runs on the board.
@@ -127,6 +127,17 @@ Codec playback, fallback, reconnect and suspend/resume require hardware validati
 After flashing, check LDAC-, AAC- and SBC-capable speakers and verify the displayed codec,
 then test volume/mute, power-save resume, reconnect and sync against another Sendspin player.
 
+AAC uses the Fraunhofer FDK AAC encoder (`components/fdk-aac`), the one Android uses. Its
+peak-bitrate limit is set from the speaker's MTU, so every AAC frame fits one Bluetooth media
+packet; the average target is lowered only when the MTU is too small for 256 kbit/s. Espressif's
+encoder, used before, only bounds the average bitrate, so dense music produced frames that had
+to be skipped (audible 23 ms gaps). FDK delays audio by about 36 ms at 44.1 kHz; that delay is
+reported to Sendspin's sync, so it does not need a manual static delay. FDK's optional
+**afterburner** (Settings → "AAC afterburner") gives slightly better AAC at about 2.5× the encoding
+CPU. It is off by default: with it on, dense music at 256 kbit/s took up to 30 ms to encode a
+23 ms frame on the S31. Changing it restarts only the AAC encoder. FDK's licence grants no
+AAC patent rights (see its NOTICE); as with LDAC, a commercial product must handle that itself.
+
 LDAC uses the pinned Sony/AOSP encoder in `components/libldac` (Apache 2.0; upstream LICENSE
 and NOTICE retained). Sony's NOTICE says LDAC in a commercial product needs Sony's
 [certification](https://www.sony.net/Products/LDAC/aosp/); this is a hobby project, so anyone
@@ -159,7 +170,7 @@ uv run --python 3.11 --with ziglang python tests/run_bt_encoder_host.py
 python -m unittest discover -s tests -p test_ldac_overlay.py
 ```
 
-These use the real LDAC encoder, AAC/SBC and FreeRTOS test doubles, and checked SDK transforms
+These use the real LDAC and FDK-AAC encoders, SBC and FreeRTOS test doubles, and checked SDK transforms
 to verify all four PCM formats and LDAC quality modes, packed PCM conversion, bitstream framing,
 consumed-frame accounting, retry ownership, timestamps, resume,
 MTU rejection, cleanup and isolation from other projects. They do not validate the Bluetooth radio.
@@ -229,8 +240,10 @@ This is a port; the design, behaviour and defaults come from these projects:
   that supports the ESP32-S31.
 - **[libldac](https://android.googlesource.com/platform/external/libldac/)**, Sony's LDAC encoder
   from the Android Open Source Project (Apache 2.0), vendored in `components/libldac`.
+- **[FDK AAC](https://github.com/mstorsjo/fdk-aac)**, the Fraunhofer FDK AAC Codec Library for
+  Android (via the fdk-aac standalone mirror); its encoder is vendored in `components/fdk-aac`.
 - **[esp_audio_codec](https://components.espressif.com/components/espressif/esp_audio_codec)**,
-  Espressif's AAC and SBC encoders.
+  Espressif's SBC encoder.
 - LDAC and AAC/SBC output, the Bluedroid LDAC transport overlay and the diagnostics were
   contributed and hardware-tested by Simon ([techfoundrynz](https://github.com/techfoundrynz)).
 
@@ -240,6 +253,10 @@ MIT, see [LICENSE](LICENSE). It keeps the original sendspin-bt-bridge copyright 
 Dependencies keep their own licenses:
 - sendspin-cpp and ESP-IDF: Apache 2.0
 - the vendored libldac: Apache 2.0, with its LICENSE and NOTICE in `components/libldac`
+- the vendored FDK AAC encoder: the Software License for The Fraunhofer FDK AAC Codec Library for
+  Android, kept in `components/fdk-aac/NOTICE`. It allows redistribution in source and binary
+  form with that notice, and the source must stay available to recipients of binaries (this
+  repository does that). It grants no patent licence.
 - `espressif/esp_audio_codec`: the Espressif Modified MIT License, which permits use **only with
   Espressif chips**. That is fine for this firmware, but that code cannot be reused on other
   hardware.
@@ -249,11 +266,12 @@ Dependencies keep their own licenses:
 ```
 platformio.ini        pioarduino platform, board, partitions
 sdkconfig.defaults    Bluetooth Classic, PSRAM, Sendspin roles, networking
-partitions.csv        NVS + two 3 MB OTA slots
+partitions.csv        NVS + two 6 MB OTA slots (16 MB flash)
 src/main.cpp          Sendspin client, idle machine, glue between the parts
 src/bt_manager.*      Bluedroid A2DP source, AVRCP, GAP, reconnect policy
 src/bt_encoder.*      LDAC/AAC/SBC negotiation, software encoding, paced A2DP delivery
 components/libldac/   pinned Sony/AOSP LDAC encoder with upstream license/notice
+components/fdk-aac/   pinned Fraunhofer FDK AAC encoder libraries with upstream NOTICE
 scripts/              checked project-local Bluedroid source overlay and protocol helpers
 src/audio_pipe.*      PCM ring buffer between the Sendspin decoder and Bluetooth
 src/wifi_manager.*    Wi-Fi station / setup access point, mDNS

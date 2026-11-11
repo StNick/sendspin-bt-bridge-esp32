@@ -1,8 +1,9 @@
 """Run encoder/transport regression checks without a board.
 
 uv run --with ziglang python tests/run_bt_encoder_host.py
-Uses the real LDAC encoder and ESP-IDF header; AAC/SBC and FreeRTOS are test doubles.
+Uses the real LDAC and FDK-AAC encoders and ESP-IDF header; SBC and FreeRTOS are test doubles.
 """
+import concurrent.futures
 import os
 import importlib.util
 from pathlib import Path
@@ -62,6 +63,7 @@ int xTaskCreate(void (*entry)(void*), const char*, uint32_t, void*, unsigned, vo
 int xTaskCreatePinnedToCore(void (*entry)(void*), const char*, uint32_t, void*, unsigned, void*, int);
 void vTaskDelete(void*);
 void vTaskDelay(TickType_t);
+inline unsigned uxTaskGetStackHighWaterMark(void*) { return 0; }
 """,
     "host_codec.h": """
 #pragma once
@@ -71,7 +73,6 @@ constexpr int ESP_AUDIO_ERR_OK = 0, ESP_AUDIO_ERR_FAIL = -1;
 struct esp_audio_enc_in_frame_t { uint8_t* buffer; uint32_t len; };
 struct esp_audio_enc_out_frame_t { uint8_t* buffer; uint32_t len; uint32_t encoded_bytes; uint64_t pts; };
 struct esp_audio_enc_info_t { uint32_t bitrate; };
-struct esp_aac_enc_config_t { int sample_rate, channel, bits_per_sample, bitrate; bool adts_used; };
 enum { ESP_SBC_CH_MODE_MONO, ESP_SBC_CH_MODE_DUAL, ESP_SBC_CH_MODE_STEREO, ESP_SBC_CH_MODE_JOINT_STEREO };
 constexpr int ESP_SBC_ALLOC_LOUDNESS = 0;
 struct esp_sbc_enc_config_t { int sample_rate, ch_mode, allocation_method, bitpool, block_length, sub_bands_num; };
@@ -83,10 +84,8 @@ int esp_##n##_enc_get_info(void*, esp_audio_enc_info_t*); \\
 int esp_##n##_enc_reset(void*); \\
 int esp_##n##_enc_process(void*, esp_audio_enc_in_frame_t*, esp_audio_enc_out_frame_t*); \\
 void esp_##n##_enc_close(void*);
-DECLARE_CODEC(aac)
 DECLARE_CODEC(sbc)
 """,
-    "esp_aac_enc.h": '#include "host_codec.h"\n',
     "esp_sbc_enc.h": '#include "host_codec.h"\n',
 }
 
@@ -102,21 +101,40 @@ with tempfile.TemporaryDirectory(prefix="bt-encoder-") as temp:
         target.write_text(body)
     executable = work / ("encoder_test.exe" if os.name == "nt" else "encoder_test")
     ldac = ROOT / "components/libldac"
-    objects = []
+    fdk = ROOT / "components/fdk-aac"
+    fdk_includes = [arg for lib in ("libAACenc", "libSYS", "libFDK", "libMpegTPEnc", "libPCMutils",
+                                    "libSACenc", "libSBRenc") for arg in ("-I", str(fdk / lib / "include"))]
+
+    def compile_fdk(source):
+        obj = work / "fdk" / (source.replace("/", "_") + ".o")
+        subprocess.run([sys.executable, "-m", "ziglang", "c++", "-O2", "-w", *fdk_includes,
+                        "-c", str(fdk / source), "-o", str(obj)], check=True)
+        return str(obj)
+
+    (work / "fdk").mkdir()
+    fdk_sources = (fdk / "sources.txt").read_text().split()
+    with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 4) as pool:
+        objects = list(pool.map(compile_fdk, fdk_sources))
     for source in ("ldaclib.c", "ldacBT.c"):
         obj = work / (source + ".o")
         subprocess.run([sys.executable, "-m", "ziglang", "cc", "-O2", "-std=c99", "-fsigned-char",
                         "-I", str(ldac / "inc"), "-I", str(ldac / "src"),
                         "-c", str(ldac / "src" / source), "-o", str(obj)], check=True)
         objects.append(str(obj))
-    subprocess.run([
+    common = [
         sys.executable, "-m", "ziglang", "c++", "-std=c++17", "-pthread",
         "-I", str(work), "-I", str(ROOT / "src"),
         "-I", str(work / "overlay/include"), "-I", str(ROOT / "scripts"),
         "-I", str(ldac / "inc"), "-DAVDT_CODEC_SIZE=11",
         "-I", str(IDF / "components/bt/host/bluedroid/api/include/api"),
-        str(ROOT / "src/bt_encoder.cpp"), str(ROOT / "tests/bt_encoder_host.cpp"),
-        *objects,
-        "-o", str(executable),
-    ], check=True)
+        "-I", str(fdk / "libAACenc/include"), "-I", str(fdk / "libSYS/include"),
+    ]
+    # The firmware's FDK calls are routed through the test's wrappers, which count open handles
+    # and can inflate a frame to exercise the oversized-frame path. The test itself calls FDK.
+    encoder_obj = work / "bt_encoder.o"
+    subprocess.run([*common, "-DaacEncOpen=host_aacEncOpen", "-DaacEncClose=host_aacEncClose",
+                    "-DaacEncEncode=host_aacEncEncode", "-DaacEncoder_SetParam=host_aacEncoder_SetParam",
+                    "-c", str(ROOT / "src/bt_encoder.cpp"), "-o", str(encoder_obj)], check=True)
+    subprocess.run([*common, str(ROOT / "tests/bt_encoder_host.cpp"), str(encoder_obj),
+                    *objects, "-o", str(executable)], check=True)
     subprocess.run([str(executable)], check=True, timeout=20)

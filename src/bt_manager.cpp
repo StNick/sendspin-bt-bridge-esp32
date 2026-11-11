@@ -50,6 +50,7 @@ enum class Cmd : uint8_t {
     VOLUME,
     POLICY,
     LDAC_QUALITY,
+    AAC_AFTERBURNER,
 };
 
 struct DiscResult {
@@ -148,6 +149,7 @@ esp_err_t BtManager::init(const AppConfig& config, AudioPipe* pipe, Callbacks ca
     pipe_ = pipe;
     callbacks_ = std::move(callbacks);
     encoder_.set_ldac_quality(config.ldac_quality);
+    encoder_.set_aac_afterburner(config.aac_afterburner);
     check_interval_s_ = config.bt_check_interval_s;
     max_fails_ = config.bt_max_reconnect_fails;
     has_target_ = config.has_speaker;
@@ -1081,6 +1083,9 @@ void BtManager::handle_cmd(const Msg& msg) {
         case Cmd::LDAC_QUALITY:
             encoder_.set_ldac_quality(static_cast<LdacQuality>(c.a));
             break;
+        case Cmd::AAC_AFTERBURNER:
+            encoder_.set_aac_afterburner(c.a != 0);
+            break;
     }
 }
 
@@ -1237,6 +1242,14 @@ void BtManager::set_ldac_quality(LdacQuality quality) {
     msg.kind = Kind::CMD;
     msg.u.cmd.type = Cmd::LDAC_QUALITY;
     msg.u.cmd.a = static_cast<int32_t>(quality);
+    post(msg, pdMS_TO_TICKS(200));
+}
+
+void BtManager::set_aac_afterburner(bool enabled) {
+    Msg msg{};
+    msg.kind = Kind::CMD;
+    msg.u.cmd.type = Cmd::AAC_AFTERBURNER;
+    msg.u.cmd.a = enabled ? 1 : 0;
     post(msg, pdMS_TO_TICKS(200));
 }
 
